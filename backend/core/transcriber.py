@@ -2,7 +2,6 @@
 Faster-Whisper based audio transcription module.
 Optimized for RTX 4070 Super with float16 precision.
 """
-import io
 from typing import Optional, Tuple
 import numpy as np
 from faster_whisper import WhisperModel
@@ -64,43 +63,39 @@ class TranscriberEngine:
         self, audio_chunk: bytes, chunk_number: int = 0
     ) -> Optional[str]:
         """
-        Transcribe a single audio chunk from a stream.
-        Used for real-time processing.
-        
+        Transcribe a single audio chunk from a stream (raw int16 PCM at 16kHz).
+
         Args:
-            audio_chunk: Raw PCM audio bytes
+            audio_chunk: Raw PCM int16 audio bytes at 16 kHz
             chunk_number: Sequential chunk identifier
-            
+
         Returns:
-            Transcribed text (None if chunk too short)
+            Transcribed text (None if chunk too short or empty)
         """
         try:
-            # Convert bytes to numpy array for Whisper
-            audio_data = np.frombuffer(audio_chunk, dtype=np.float32)
-            
-            # Resample to 16kHz if needed
-            current_rate = 16000  # Assuming standard rate
-            if len(audio_data) < current_rate * 0.5:  # Less than 500ms
-                logger.debug(f"Chunk {chunk_number} too short, skipping")
+            # Raw PCM from browser MediaRecorder is int16 — interpret correctly,
+            # then normalise to float32 in [-1, 1] as Whisper expects.
+            audio_data = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # Minimum 500 ms of audio at 16 kHz = 8000 samples
+            if len(audio_data) < 8000:
+                logger.debug(f"Chunk {chunk_number} too short ({len(audio_data)} samples), skipping")
                 return None
-            
-            # Create temporary buffer
-            audio_io = io.BytesIO(audio_chunk)
-            
+
             segments, _ = self.model.transcribe(
-                audio_io,
+                audio_data,
                 language="en",
-                beam_size=3,  # Smaller for real-time
+                beam_size=3,
                 temperature=0.0,
             )
-            
-            text = " ".join([segment.text for segment in segments])
-            if text.strip():
+
+            text = " ".join([segment.text for segment in segments]).strip()
+            if text:
                 logger.info(f"Stream chunk {chunk_number} transcribed: {len(text)} chars")
                 return text
-            
+
             return None
-            
+
         except Exception as e:
             logger.warning(f"Stream transcription error on chunk {chunk_number}: {str(e)}")
             return None

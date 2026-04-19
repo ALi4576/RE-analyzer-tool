@@ -30,18 +30,20 @@ class WebSocketManager:
     def __init__(self):
         """Initialize WebSocket manager."""
         self.active_connections: Dict[str, WebSocket] = {}
+        self._lock = asyncio.Lock()
         logger.info("WebSocket Manager initialized")
-    
+
     async def connect(self, websocket: WebSocket, session_id: str) -> None:
         """Register new WebSocket connection."""
         await websocket.accept()
-        self.active_connections[session_id] = websocket
+        async with self._lock:
+            self.active_connections[session_id] = websocket
         logger.info(f"WebSocket connected for session {session_id}")
-    
+
     async def disconnect(self, session_id: str) -> None:
         """Cleanup disconnected WebSocket."""
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
+        async with self._lock:
+            self.active_connections.pop(session_id, None)
         logger.info(f"WebSocket disconnected for session {session_id}")
     
     async def send_message(self, session_id: str, message: Dict) -> bool:
@@ -160,7 +162,7 @@ class StreamingAnalysisHandler:
                 msg_type = message.get("type")
                 
                 if msg_type == "audio_chunk":
-                    await self._handle_audio_chunk(session_id, message, context_docs, accumulated_text)
+                    accumulated_text = await self._handle_audio_chunk(session_id, message, context_docs, accumulated_text)
                     chunk_count += 1
                     
                 elif msg_type == "finalize":
@@ -182,33 +184,40 @@ class StreamingAnalysisHandler:
             await self.ws_manager.disconnect(session_id)
             logger.info(f"GPU stats: {self.gpu_manager.get_stats()}")
     
-    async def _handle_audio_chunk(self, session_id: str, message: Dict, context_docs: List, accumulated_text: str):
+    async def _handle_audio_chunk(
+        self, session_id: str, message: Dict, context_docs: List, accumulated_text: str
+    ) -> str:
         """
         Handle incoming audio chunk.
-        
+
+        Returns the updated accumulated_text so the caller can persist it;
+        Python strings are immutable so parameter mutation would be a no-op.
+
         Args:
             session_id: Session ID
             message: Message containing audio data
             context_docs: Context documents
             accumulated_text: Current accumulated text
+
+        Returns:
+            Updated accumulated text (original + new transcription)
         """
         try:
             chunk_data = message.get("data")
             chunk_number = message.get("chunk_number", 0)
-            is_final = message.get("is_final", False)
-            
+
             # Decode base64 audio if needed
             if isinstance(chunk_data, str):
                 audio_bytes = base64.b64decode(chunk_data)
             else:
                 audio_bytes = chunk_data
-            
+
             # Transcribe audio chunk
             transcription = self.transcriber.transcribe_stream(audio_bytes, chunk_number)
-            
+
             if transcription:
-                accumulated_text += " " + transcription
-            
+                accumulated_text = accumulated_text + " " + transcription
+
             # Send chunk acknowledgment
             await self.ws_manager.send_message(
                 session_id,
@@ -219,18 +228,20 @@ class StreamingAnalysisHandler:
                     "accumulated_length": len(accumulated_text),
                 },
             )
-            
+
             # Trigger analysis every 50 characters (sliding window)
             if len(accumulated_text) > 0 and len(accumulated_text) % 50 == 0:
                 logger.info(f"Triggering incremental analysis for session {session_id} at {len(accumulated_text)} chars")
                 await self._run_analysis(session_id, accumulated_text, context_docs)
-        
+
         except Exception as e:
             logger.error(f"Audio chunk handling error: {str(e)}")
             await self.ws_manager.send_message(
                 session_id,
                 {"type": "error", "message": f"Audio chunk error: {str(e)}"},
             )
+
+        return accumulated_text
     
     async def _run_analysis(self, session_id: str, text: str, context_docs: List):
         """Run analysis on accumulated text."""
@@ -241,7 +252,7 @@ class StreamingAnalysisHandler:
                 context_docs=context_docs if context_docs else None,
             )
             
-            result = self.agent.analyze(state)
+            result = await self.agent.analyze(state)
             
             # SCRIBE MODE: Always include requirements_list (never null)
             requirements_list = result.get("requirements", [])
@@ -294,7 +305,7 @@ class StreamingAnalysisHandler:
             clarifications = message.get("clarifications", {})
             logger.info(f"Processing clarifications for session {session_id}")
             
-            result = self.agent.resume_after_clarification(session_id, clarifications)
+            result = await self.agent.resume_after_clarification(session_id, clarifications)
             
             # SCRIBE MODE: Always include requirements_list
             requirements_list = result.get("requirements", [])

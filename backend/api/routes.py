@@ -22,6 +22,7 @@ from core import (
     get_export_manager,
     get_formalizer,
 )
+from core.gpu_manager import get_gpu_manager
 from services import (
     get_file_service,
     get_stream_service,
@@ -44,45 +45,58 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
     The analysis may be interrupted if quality issues are found,
     requesting human clarification via returned questions.
     """
-    try:
-        logger.info(f"Starting analysis for session {request.session_id}")
-
-        from models.schemas import RequirementAnalysisState, AnalysisStatus
-
-        # Create analysis state
-        state = RequirementAnalysisState(
-            session_id=request.session_id,
-            input_text=request.text,
-        )
-
-        # Load context if provided
-        if request.context_file_path:
-            logger.info(f"Loading context from {request.context_file_path}")
-            reader_service = get_reader_service()
-            try:
-                context_payload = await reader_service.read_document(request.context_file_path)
-                state.context_docs = [context_payload]
-                logger.info("Context loaded successfully")
-            except Exception as e:
-                logger.warning(f"Failed to load context: {str(e)}")
-
-        # Run analysis
-        agent = get_agent()
-        result = agent.analyze(state)
-
-        logger.info(f"Analysis complete for session {request.session_id}")
-
+    # Fast-reject inputs that are too short to be meaningful requirements
+    if len(request.text.strip()) < 20:
         return {
             "session_id": request.session_id,
-            "status": result.get("status", "analyzing"),
-            "interrupt_needed": result.get("interrupt_needed", False),
-            "clarification_questions": result.get("clarification_questions"),
-            "analysis_summary": {
-                "smell_score": result.get("smell_score"),
-                "logical_gap_score": result.get("logical_gap_score"),
-                "issues_found": len(result.get("smells", [])),
-            }
+            "status": "pending",
+            "interrupt_needed": False,
+            "clarification_questions": None,
+            "analysis_summary": {"smell_score": 0.0, "logical_gap_score": 0.0, "issues_found": 0},
         }
+
+    try:
+        # Gate concurrent LLM usage through the shared GPU semaphore
+        gpu_manager = get_gpu_manager()
+        async with gpu_manager.session_semaphore:
+            logger.info(f"Starting analysis for session {request.session_id}")
+
+            from models.schemas import RequirementAnalysisState
+
+            # Create analysis state
+            state = RequirementAnalysisState(
+                session_id=request.session_id,
+                input_text=request.text,
+            )
+
+            # Load context if provided
+            if request.context_file_path:
+                logger.info(f"Loading context from {request.context_file_path}")
+                reader_service = get_reader_service()
+                try:
+                    context_payload = await reader_service.read_document(request.context_file_path)
+                    state.context_docs = [context_payload]
+                    logger.info("Context loaded successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to load context: {str(e)}")
+
+            # Run analysis (non-blocking — asyncio.to_thread inside agent.analyze)
+            agent = get_agent()
+            result = await agent.analyze(state)
+
+            logger.info(f"Analysis complete for session {request.session_id}")
+
+            return {
+                "session_id": request.session_id,
+                "status": result.get("status", "analyzing"),
+                "interrupt_needed": result.get("interrupt_needed", False),
+                "clarification_questions": result.get("clarification_questions"),
+                "analysis_summary": {
+                    "smell_score": result.get("smell_score"),
+                    "logical_gap_score": result.get("logical_gap_score"),
+                    "issues_found": len(result.get("smells", [])),
+                },
+            }
 
     except Exception as e:
         logger.error(f"Analysis error: {str(e)}")
@@ -102,7 +116,7 @@ async def clarify_requirements(response: ClarificationResponse):
         agent = get_agent()
         clarifications = {response.question_id: response.user_response}
 
-        result = agent.resume_after_clarification(
+        result = await agent.resume_after_clarification(
             response.session_id,
             clarifications
         )
@@ -222,34 +236,54 @@ async def upload_document(file: UploadFile = File(...)):
 @router.post("/formalize", response_model=FormalizedRequirement)
 async def formalize_requirements(session_id: str):
     try:
-        logger.info(
-            f"Retrieving requirements from memory for session {session_id}")
+        logger.info(f"Retrieving requirements from memory for session {session_id}")
 
         agent = get_agent()
-
-        # 1. Reach into the LangGraph Memory (The 'Database' in RAM)
         config = {"configurable": {"thread_id": session_id}}
         state = agent.app.get_state(config)
 
-        # 2. Check if the AI actually has data for this session
         if not state.values:
+            raise HTTPException(status_code=404, detail="No data found for this session ID")
+
+        # Guard: only return data once the workflow has reached a terminal state
+        current_status = state.values.get("status", "")
+        if current_status not in ("formal_draft", "export_ready", "clarified"):
             raise HTTPException(
-                status_code=404, detail="No data found for this session ID")
+                status_code=409,
+                detail=f"Analysis still in progress (status={current_status}). Retry after it completes."
+            )
 
-        # 3. Pull the actual requirements found by the AI nodes
-        # Note: 'requirements' must match the key used in your AgentState TypedDict
-        ai_requirements = state.values.get("requirements", [])
+        raw_requirements = state.values.get("requirements", [])
 
-        # 4. Return the ACTUAL data to your Flutter/React app
+        # Coerce raw dicts → validated ISORequirement fields with safe defaults
+        iso_requirements = []
+        for i, req in enumerate(raw_requirements, 1):
+            if not isinstance(req, dict):
+                continue
+            iso_requirements.append({
+                "requirement_id": req.get("requirement_id") or f"REQ-{i:04d}",
+                "title": req.get("title") or "Untitled Requirement",
+                "shall_statement": req.get("shall_statement") or "The system shall meet this requirement.",
+                "rationale": req.get("rationale") or "",
+                "acceptance_criteria": req.get("acceptance_criteria") or [],
+                "priority": req.get("priority") or "Medium",
+                "category": req.get("category"),
+                "traceability": req.get("traceability") or req.get("depends_on") or [],
+            })
+
+        completeness = state.values.get("formalized", {}).get("completeness_score", 0.0)
+
         return FormalizedRequirement(
-            iso_requirements=ai_requirements,
-            summary=f"Found {len(ai_requirements)} requirements",
-            total_requirements=len(ai_requirements),
-            completeness_score=state.values.get("logical_gap_score", 0.0),
-            ready_for_export=len(ai_requirements) > 0,
-            export_formats=["jira", "trello"]
+            iso_requirements=iso_requirements,
+            summary=f"Found {len(iso_requirements)} ISO 29148 requirements",
+            total_requirements=len(iso_requirements),
+            completeness_score=completeness,
+            ready_for_export=len(iso_requirements) > 0,
+            export_formats=["jira", "trello"],
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Formalization error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -263,22 +297,36 @@ async def export_requirements(request: ExportRequirementRequest):
         logger.info(f"Exporting for session {request.session_id}")
         
         agent = get_agent()
-        # 1. Pull actual requirements from AI memory
         config = {"configurable": {"thread_id": request.session_id}}
         state = agent.app.get_state(config)
-        ai_requirements = state.values.get("requirements", [])
+        raw_requirements = state.values.get("requirements", [])
 
-        if not ai_requirements:
+        if not raw_requirements:
             raise HTTPException(status_code=400, detail="No formalized requirements found to export.")
 
-        # 2. Package them for the export manager
+        # Coerce raw dicts → validated ISORequirement fields with safe defaults
+        iso_requirements = []
+        for i, req in enumerate(raw_requirements, 1):
+            if not isinstance(req, dict):
+                continue
+            iso_requirements.append({
+                "requirement_id": req.get("requirement_id") or f"REQ-{i:04d}",
+                "title": req.get("title") or "Untitled Requirement",
+                "shall_statement": req.get("shall_statement") or "The system shall meet this requirement.",
+                "rationale": req.get("rationale") or "",
+                "acceptance_criteria": req.get("acceptance_criteria") or [],
+                "priority": req.get("priority") or "Medium",
+                "category": req.get("category"),
+                "traceability": req.get("traceability") or req.get("depends_on") or [],
+            })
+
         formalized = FormalizedRequirement(
-            iso_requirements=ai_requirements,
-            summary=f"Exporting {len(ai_requirements)} requirements",
-            total_requirements=len(ai_requirements),
+            iso_requirements=iso_requirements,
+            summary=f"Exporting {len(iso_requirements)} requirements",
+            total_requirements=len(iso_requirements),
             completeness_score=state.values.get("logical_gap_score", 0.0),
             ready_for_export=True,
-            export_formats=["jira", "trello"]
+            export_formats=["jira", "trello"],
         )
 
         export_manager = get_export_manager()

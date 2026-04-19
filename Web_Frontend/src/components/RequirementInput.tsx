@@ -1,33 +1,74 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { Send, FileUp } from 'lucide-react';
+
+// Fire an incremental analysis every time the user crosses a new
+// multiple of this many characters. Each call sends the FULL cumulative
+// text so the backend sees a sliding window: chars 1-30, then 1-60, 1-90...
+const INCREMENTAL_CHAR_THRESHOLD = 30;
 
 interface RequirementInputProps {
   onAnalyze: (text: string) => Promise<void>;
+  // Non-blocking variant fired while the user is still typing.
+  // Synchronous (returns void) so the textarea onChange never awaits it.
+  onIncrementalAnalyze?: (text: string) => void;
   isLoading: boolean;
 }
 
 export const RequirementInput: React.FC<RequirementInputProps> = ({
   onAnalyze,
+  onIncrementalAnalyze,
   isLoading,
 }) => {
   const [text, setText] = useState('');
   const [charCount, setCharCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    const delayDebounceFn = setTimeout(() => {
-      if (charCount > 0 && charCount % 50 === 0) {
-        onAnalyze(text.trim());
-      }
-    }, 0); // Trigger analysis immediately after every 50 characters
+  // Tracks the highest 30-char milestone we've already dispatched for the
+  // current text. Using a ref (not state) so we don't fire on every render,
+  // and so that shrinking text (deletions) correctly lowers the watermark
+  // without re-firing milestones the user has already passed.
+  const lastFiredMilestoneRef = useRef(0);
+  // Debounce timer handle — 150ms pause means we don't fire mid-keystroke
+  // burst (a 60-char paste triggers once, not twice).
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    return () => clearTimeout(delayDebounceFn);
-  }, [charCount, text, onAnalyze]);
+  const maybeFireIncremental = useCallback(
+    (fullText: string) => {
+      const len = fullText.trim().length;
+      const milestone =
+        Math.floor(len / INCREMENTAL_CHAR_THRESHOLD) * INCREMENTAL_CHAR_THRESHOLD;
+
+      // If the user deleted below a previous milestone, reset the watermark
+      // so crossing that boundary again will re-trigger analysis.
+      if (milestone < lastFiredMilestoneRef.current) {
+        lastFiredMilestoneRef.current = milestone;
+        return;
+      }
+
+      // Only fire when we've crossed into a new, strictly-higher milestone
+      // (and we have at least one full threshold's worth of content).
+      if (milestone > lastFiredMilestoneRef.current && milestone >= INCREMENTAL_CHAR_THRESHOLD) {
+        lastFiredMilestoneRef.current = milestone;
+        if (onIncrementalAnalyze) {
+          onIncrementalAnalyze(fullText.trim());
+        }
+      }
+    },
+    [onIncrementalAnalyze]
+  );
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newText = e.target.value;
     setText(newText);
     setCharCount(newText.length);
+
+    // Debounce the incremental trigger: coalesces rapid keystrokes / pastes
+    // so a single 90-char paste does NOT fan out into three overlapping
+    // network requests. The store also cancels stale in-flight requests.
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      maybeFireIncremental(newText);
+    }, 150);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -36,6 +77,11 @@ export const RequirementInput: React.FC<RequirementInputProps> = ({
       await onAnalyze(text.trim());
       setText('');
       setCharCount(0);
+      lastFiredMilestoneRef.current = 0;
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
     }
   };
 
@@ -82,8 +128,8 @@ export const RequirementInput: React.FC<RequirementInputProps> = ({
     }
   };
 
-  const minLength = 1; // Allow analysis even with 1 character
-  const isValid = text.length > 0;
+  const minLength = 20; // Match the backend's input-length gate
+  const isValid = text.trim().length >= minLength;
 
   return (
     <div className="w-full">

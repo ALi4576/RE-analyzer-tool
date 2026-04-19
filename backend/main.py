@@ -44,6 +44,7 @@ Key Design Patterns:
 - Singleton Pattern: Shared GPU-bound resources
 """
 
+import asyncio
 import logging
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -84,10 +85,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Initialization error: {str(e)}")
         raise
-    
+
+    # Background task: evict expired sessions every 5 minutes to prevent unbounded RAM growth
+    async def _cleanup_loop():
+        from core.session_manager import get_session_manager
+        while True:
+            await asyncio.sleep(300)
+            count = get_session_manager().cleanup_expired_sessions()
+            if count:
+                logger.info(f"Cleanup: removed {count} expired sessions")
+
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+
     yield
-    
+
     # Shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Multi-Agentic RE Tool Backend Shutting Down")
     logger.info("Cleaning up GPU resources...")
 

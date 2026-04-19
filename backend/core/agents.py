@@ -2,11 +2,11 @@
 Multi-Agent Orchestration using LangGraph.
 Implements the "Squad" logic with Human-in-the-Loop pattern for requirements analysis.
 """
+import asyncio
 from typing import Dict, Any, List, TypedDict, Literal
 from langchain_ollama import OllamaLLM
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 from config import settings
 from models.schemas import (
     ISORequirement,
@@ -56,12 +56,21 @@ class RequirementsAnalysisAgent:
     
     def __init__(self):
         """Initialize agent squad with LangGraph."""
-        # Initialize LLM
+        # Initialize LLM for analysis nodes (smell, logic, parse)
         self.llm = OllamaLLM(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.OLLAMA_MODEL,
             temperature=settings.OLLAMA_TEMPERATURE,
-            format="json"
+            format="json",
+            request_timeout=25,  # prevent hung requests from blocking a GPU slot indefinitely
+        )
+        # Low-temperature LLM for deterministic ISO 29148 formalization
+        self.formalize_llm = OllamaLLM(
+            base_url=settings.OLLAMA_BASE_URL,
+            model=settings.OLLAMA_MODEL,
+            temperature=settings.OLLAMA_FORMALIZE_TEMPERATURE,
+            format="json",
+            request_timeout=25,
         )
         
         # Initialize state persister
@@ -112,18 +121,18 @@ class RequirementsAnalysisAgent:
         
         return workflow
     
-    def analyze(self, state: RequirementAnalysisState) -> Dict[str, Any]:
+    async def analyze(self, state: RequirementAnalysisState) -> Dict[str, Any]:
         """
-        Run the analysis workflow.
-        
+        Run the analysis workflow (non-blocking — wraps sync LangGraph invoke in a thread).
+
         Args:
             state: Initial analysis state
-            
+
         Returns:
             Final analysis response
         """
         logger.info(f"Starting analysis for session {state.session_id}")
-        
+
         try:
             # Convert Pydantic model to dict for LangGraph
             state_dict: AgentState = {
@@ -133,105 +142,125 @@ class RequirementsAnalysisAgent:
                 "status": state.status.value if hasattr(state.status, 'value') else str(state.status),
                 "interrupt_needed": False,
             }
-            
-            # Run the workflow with checkpointing
-            result = self.app.invoke(
+
+            # Run the workflow in a thread so the async event loop stays unblocked
+            result = await asyncio.to_thread(
+                self.app.invoke,
                 state_dict,
-                config={"configurable": {"thread_id": state.session_id}},
+                {"configurable": {"thread_id": state.session_id}},
             )
-            
+
             logger.info(f"Analysis complete for session {state.session_id}")
-            
+
             # Ensure result is a dict and convert Pydantic objects to dicts
             if isinstance(result, dict):
                 result_dict = result
             else:
                 result_dict = result.model_dump() if hasattr(result, 'model_dump') else dict(result)
-            
+
             # Convert Pydantic objects to dicts for JSON serialization
             if "smells" in result_dict and result_dict["smells"]:
                 result_dict["smells"] = [
-                    s.model_dump() if hasattr(s, 'model_dump') else s 
+                    s.model_dump() if hasattr(s, 'model_dump') else s
                     for s in result_dict["smells"]
                 ]
-            
+
             if "clarification_questions" in result_dict and result_dict["clarification_questions"]:
                 result_dict["clarification_questions"] = [
-                    q.model_dump() if hasattr(q, 'model_dump') else q 
+                    q.model_dump() if hasattr(q, 'model_dump') else q
                     for q in result_dict["clarification_questions"]
                 ]
-            
+
             if "requirements" in result_dict and result_dict["requirements"]:
                 result_dict["requirements"] = [
-                    r.model_dump() if hasattr(r, 'model_dump') else r 
+                    r.model_dump() if hasattr(r, 'model_dump') else r
                     for r in result_dict["requirements"]
                 ]
-            
+
             logger.info(f"Result state keys: {list(result_dict.keys())}")
             logger.info(f"Requirements count: {len(result_dict.get('requirements', []))}")
             logger.info(f"Status: {result_dict.get('status')}")
-            
+
             return result_dict
-            
+
         except Exception as e:
             logger.error(f"Analysis error: {str(e)}", exc_info=True)
             raise
     
-    def resume_after_clarification(
+    async def resume_after_clarification(
         self, session_id: str, clarifications: Dict[str, str]
     ) -> Dict[str, Any]:
         """
         Resume workflow after user provides clarifications.
-        
+
+        Reads existing state, merges clarifications into user_clarifications, and
+        re-runs the full pipeline so the formalizer picks them up.
+
         Args:
             session_id: Session ID
-            clarifications: User's clarification answers
-            
+            clarifications: User's clarification answers {question_id: answer}
+
         Returns:
             Updated analysis response
         """
         logger.info(f"Resuming analysis with clarifications for session {session_id}")
-        
-        from langgraph.types import Command
-        
+
         try:
-            # Resume graph execution
-            result = self.app.invoke(
-                Command(resume=clarifications),
-                config={"configurable": {"thread_id": session_id}},
+            config = {"configurable": {"thread_id": session_id}}
+
+            # Read previous state to get the original input text and any prior clarifications
+            existing = self.app.get_state(config)
+            if not existing.values:
+                raise ValueError(f"No existing state for session {session_id}")
+
+            existing_clarifications = existing.values.get("user_clarifications") or {}
+            merged_clarifications = {**existing_clarifications, **clarifications}
+
+            state_dict: AgentState = {
+                "session_id": session_id,
+                "input_text": existing.values.get("input_text", ""),
+                "context_docs": existing.values.get("context_docs", []),
+                "status": "clarified",
+                "interrupt_needed": False,
+                "user_clarifications": merged_clarifications,
+            }
+
+            # Re-run pipeline in a thread (now formalizer will see user_clarifications)
+            result = await asyncio.to_thread(
+                self.app.invoke,
+                state_dict,
+                {"configurable": {"thread_id": session_id}},
             )
-            
-            # Ensure result is a dict and convert Pydantic objects to dicts
+
             if isinstance(result, dict):
                 result_dict = result
             else:
                 result_dict = result.model_dump() if hasattr(result, 'model_dump') else dict(result)
-            
-            # Convert Pydantic objects to dicts for JSON serialization
+
             if "smells" in result_dict and result_dict["smells"]:
                 result_dict["smells"] = [
-                    s.model_dump() if hasattr(s, 'model_dump') else s 
+                    s.model_dump() if hasattr(s, 'model_dump') else s
                     for s in result_dict["smells"]
                 ]
-            
+
             if "clarification_questions" in result_dict and result_dict["clarification_questions"]:
                 result_dict["clarification_questions"] = [
-                    q.model_dump() if hasattr(q, 'model_dump') else q 
+                    q.model_dump() if hasattr(q, 'model_dump') else q
                     for q in result_dict["clarification_questions"]
                 ]
-            
+
             if "requirements" in result_dict and result_dict["requirements"]:
                 result_dict["requirements"] = [
-                    r.model_dump() if hasattr(r, 'model_dump') else r 
+                    r.model_dump() if hasattr(r, 'model_dump') else r
                     for r in result_dict["requirements"]
                 ]
-            
+
             logger.info(f"Analysis resumed for session {session_id}")
             logger.info(f"Requirements count: {len(result_dict.get('requirements', []))}")
             logger.info(f"Status: {result_dict.get('status')}")
-            
+
             return result_dict
-            
+
         except Exception as e:
             logger.error(f"Resume error: {str(e)}")
             raise
@@ -327,17 +356,21 @@ Format as JSON with fields: [{{\"type\": \"...\", \"severity\": 0.8, \"location\
     def _should_interrupt(self, state: AgentState) -> bool:
         """
         Determine if workflow should interrupt for human clarification.
-        
-        Triggers when:
-        - Smell score >= threshold
-        - Logical gaps detected
-        - Ambigue inputs need clarification
+
+        Triggers when smell score OR logical gap score exceeds its threshold.
         """
         smell_score = state.get("smell_score", 0.0)
-        
-        should_interrupt = smell_score >= settings.SMELL_SCORE_THRESHOLD
-        logger.info(f"Interrupt check: smell_score={smell_score:.2f}, threshold={settings.SMELL_SCORE_THRESHOLD}, interrupt={should_interrupt}")
-        
+        logical_gap_score = state.get("logical_gap_score", 0.0)
+
+        smell_trigger = smell_score >= settings.SMELL_SCORE_THRESHOLD
+        gap_trigger = logical_gap_score >= settings.LOGICAL_GAP_THRESHOLD
+        should_interrupt = smell_trigger or gap_trigger
+
+        logger.info(
+            f"Interrupt check: smell={smell_score:.2f}(>={settings.SMELL_SCORE_THRESHOLD}={smell_trigger}), "
+            f"gap={logical_gap_score:.2f}(>={settings.LOGICAL_GAP_THRESHOLD}={gap_trigger}), "
+            f"interrupt={should_interrupt}"
+        )
         return should_interrupt
     
     def _analyze_logic_node(self, state: AgentState) -> AgentState:
@@ -475,7 +508,7 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
 """
         
         try:
-            formalize_response = self.llm.invoke(formalize_prompt)
+            formalize_response = self.formalize_llm.invoke(formalize_prompt)
             logger.debug(f"LLM formalization response: {formalize_response[:200]}")
             
             # Parse JSON response
@@ -496,18 +529,20 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                     logger.warning(f"Skipping non-dict requirement: {type(req)} - {str(req)[:100]}")
             
             logger.info(f"Formalization complete: {len(valid_requirements)} requirements created")
+
+            # Determine interrupt before setting formalized so ready_for_export is consistent
+            smell_score = state.get("smell_score", 0.0)
+            interrupt_needed = smell_score >= settings.SMELL_SCORE_THRESHOLD
             state["requirements"] = valid_requirements
             state["status"] = "formal_draft"
+            state["interrupt_needed"] = interrupt_needed
             state["formalized"] = {
                 "total_requirements": len(valid_requirements),
                 "completeness_score": self._calculate_requirements_completeness(valid_requirements),
-                "ready_for_export": True if valid_requirements else False,
+                # Only export-ready when there are requirements AND no pending interrupt
+                "ready_for_export": bool(valid_requirements) and not interrupt_needed,
             }
-            
-            # Set interrupt flag if smell score is high
-            smell_score = state.get("smell_score", 0.0)
-            state["interrupt_needed"] = smell_score >= settings.SMELL_SCORE_THRESHOLD
-            logger.info(f"Interrupt flag set to {state['interrupt_needed']} based on smell_score {smell_score:.2f}")
+            logger.info(f"Interrupt flag set to {interrupt_needed} based on smell_score {smell_score:.2f}")
             
         except Exception as e:
             logger.error(f"Formalization error: {str(e)}")
@@ -611,19 +646,25 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
         return questions
     
     def _extract_score(self, text: str) -> float:
-        """Extract a 0-1 score from LLM response."""
+        """Extract a 0-1 score from LLM response, preferring labeled values."""
+        import re
         try:
-            import re
-            # Look for patterns like "0.7" or "score: 0.7"
-            match = re.search(r'\d+\.?\d*', text)
-            if match:
-                score = float(match.group())
-                if 0 <= score <= 1:
-                    return score
-                elif score > 1:
-                    return min(score / 10, 1.0)
+            # Prefer labeled patterns: "score: 0.7", "consistency: 0.85", "gap: 0.3"
+            labeled = re.search(
+                r'(?:score|gap|consistency|rating|quality)[\s:=]+([01](?:\.\d+)?)',
+                text,
+                re.IGNORECASE,
+            )
+            if labeled:
+                return float(labeled.group(1))
+
+            # Fall back: find a standalone decimal like "0.72" or "0.8" that is clearly 0-1
+            decimal = re.search(r'\b0\.\d+\b', text)
+            if decimal:
+                return float(decimal.group())
+
             return 0.5
-        except:
+        except Exception:
             return 0.5
     
     def _parse_formalize_response(

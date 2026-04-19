@@ -19,6 +19,8 @@ class Settings:
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
     OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", 0.7))
+    # Low temperature for deterministic ISO formalization output
+    OLLAMA_FORMALIZE_TEMPERATURE = float(os.getenv("OLLAMA_FORMALIZE_TEMPERATURE", 0.1))
     
     # Faster-Whisper Configuration
     WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")  # tiny, base, small, medium, large
@@ -70,7 +72,7 @@ class Settings:
     # FastAPI
     FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
     FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", 8000))
-    FASTAPI_WORKERS = int(os.getenv("FASTAPI_WORKERS", 4))
+    FASTAPI_WORKERS = int(os.getenv("FASTAPI_WORKERS", 1))  # >1 would load Whisper/Ollama N times → VRAM OOM
     
     # WebSocket Settings
     WEBSOCKET_TIMEOUT = 300  # 5 minutes
