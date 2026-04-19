@@ -1,0 +1,41 @@
+# Multi-Agentic Requirements Engineering Tool Backend
+# Dependencies for RTX 4070 Super optimized pipeline
+
+# ============ Core Framework ============
+fastapi==0.104.0
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# ============ AI/ML Core ============
+torch==2.1.0+cu118
+faster-whisper==0.10.0  # CTranslate2-based Whisper for RTX
+ollama==0.1.0           # Ollama client for local LLM
+langchain==0.1.0
+langchain-ollama==0.0.1
+langgraph==0.0.20       # Stateful graph orchestration
+
+# ============ Document Processing ============
+PyMuPDF==1.23.0         # PDF extraction
+python-docx==0.8.11     # DOCX support
+pydantic==2.5.0         # Data validation
+
+# ============ Integration APIs ============
+jira==3.13.0            # Jira API
+py-trello==0.19.0       # Trello API
+
+# ============ Utilities ============
+python-dotenv==1.0.0
+pydantic-settings==2.1.0
+aiofiles==23.2.0        # Async file handling
+numpy==1.24.0
+scipy==1.11.0
+
+# ============ Logging & Monitoring ============
+python-json-logger==2.0.7
+
+# ============ Development (optional) ============
+pytest==7.4.0
+pytest-asyncio==0.21.0
+black==23.12.0
+isort==5.13.0
+mypy==1.7.0

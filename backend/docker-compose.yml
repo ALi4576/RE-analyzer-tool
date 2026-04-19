@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend
+  re-tool-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: re-tool-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - FASTAPI_HOST=0.0.0.0
+      - FASTAPI_PORT=8000
+      - DEBUG=False
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - ollama
+    networks:
+      - re-tool-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-service
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    networks:
+      - re-tool-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ollama-data:
+
+networks:
+  re-tool-network:
+    driver: bridge
