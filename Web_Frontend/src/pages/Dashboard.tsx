@@ -19,8 +19,10 @@ export const Dashboard: React.FC = () => {
         analysisState,
         formalizedRequirements,
         loading,
+        incrementalLoading,
         setSession,
         analyzeRequirements,
+        analyzeRequirementsIncremental,
         clarifyRequirements,
         fetchFormalizedRequirements,
         addNotification,
@@ -35,12 +37,9 @@ export const Dashboard: React.FC = () => {
         setupWebSocketListeners();
     }, [currentSession, setSession]);
 
-    // Fetch formalized requirements after analysis
-    useEffect(() => {
-        if (analysisState?.status === 'export_ready' || analysisState?.status === 'formal_draft') {
-            fetchFormalizedRequirements();
-        }
-    }, [analysisState?.status, fetchFormalizedRequirements]);
+    // Requirements are now returned inline by /analyze and /clarify.
+    // fetchFormalizedRequirements is kept as a fallback for manual refresh
+    // but is no longer needed for the main flow.
 
     const handleClarify = async (clarifications: Record<string, string>) => {
         await clarifyRequirements(clarifications);
@@ -94,6 +93,7 @@ export const Dashboard: React.FC = () => {
                         {/* Text Input - Scratchpad */}
                         <RequirementInput
                             onAnalyze={analyzeRequirements}
+                            onIncrementalAnalyze={analyzeRequirementsIncremental}
                             isLoading={loading}
                         />
                     </div>
@@ -119,24 +119,45 @@ export const Dashboard: React.FC = () => {
                     <div>
                         <h2 className="text-lg font-bold text-neutral-900 mb-4 flex items-center gap-2">
                             🧠 Intelligence Zone
+                            {incrementalLoading && (
+                                <span
+                                    className="ml-2 inline-flex items-center gap-1.5 text-xs font-medium text-primary-700 bg-primary-50 border border-primary-200 px-2 py-0.5 rounded-full"
+                                    aria-live="polite"
+                                >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-primary-500 animate-pulse" />
+                                    Updating
+                                </span>
+                            )}
                         </h2>
 
                         {/* Smell Meter - Quality Gauge */}
                         {analysisState && (
-                            <SmellMeter 
+                            <SmellMeter
                                 smellScore={analysisState.analysis_summary?.smell_score ?? 0}
                                 label="Quality Score"
                             />
                         )}
 
-                        {/* Requirement Feed - Scrolling Cards */}
+                        {/* Requirement Feed - Scrolling ISO 29148 specs */}
                         <div className="mt-6">
-                            <h3 className="text-sm font-semibold text-neutral-700 mb-3">
-                                Formatted Requirements
+                            <h3 className="text-sm font-semibold text-neutral-700 mb-3 flex items-center justify-between">
+                                <span>ISO 29148 Formatted Requirements</span>
+                                {formalizedRequirements && formalizedRequirements.total_requirements > 0 && (
+                                    <span className="text-xs font-normal text-neutral-500">
+                                        {formalizedRequirements.total_requirements} spec
+                                        {formalizedRequirements.total_requirements === 1 ? '' : 's'}
+                                    </span>
+                                )}
                             </h3>
-                            <RequirementFeed 
+                            {/*
+                              Only show the skeleton on the INITIAL full-submit load.
+                              For incremental refreshes, keep the previous specs visible
+                              (and let the "Updating" pill above signal background work)
+                              so the panel doesn't flash empty on every keystroke milestone.
+                            */}
+                            <RequirementFeed
                                 requirements={formalizedRequirements}
-                                isLoading={loading}
+                                isLoading={loading && !formalizedRequirements}
                             />
                         </div>
 

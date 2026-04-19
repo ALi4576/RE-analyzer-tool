@@ -11,9 +11,11 @@ from utils import get_logger
 from models.schemas import (
     AnalyzeRequirementsRequest,
     ClarificationResponse,
+    ClarifyRequest,
     ExportRequirementRequest,
     TranscribeAudioRequest,
     FormalizedRequirement,
+    FormalizeRequest,
     ExportResult,
 )
 from core import (
@@ -86,6 +88,25 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
 
             logger.info(f"Analysis complete for session {request.session_id}")
 
+            # Coerce raw requirement dicts → validated fields with safe defaults
+            raw_reqs = result.get("requirements", [])
+            iso_requirements = []
+            for i, req in enumerate(raw_reqs, 1):
+                if not isinstance(req, dict):
+                    continue
+                iso_requirements.append({
+                    "requirement_id": req.get("requirement_id") or f"REQ-{i:04d}",
+                    "title": req.get("title") or "Untitled Requirement",
+                    "shall_statement": req.get("shall_statement") or "The system shall meet this requirement.",
+                    "rationale": req.get("rationale") or "",
+                    "acceptance_criteria": req.get("acceptance_criteria") or [],
+                    "priority": req.get("priority") or "Medium",
+                    "category": req.get("category"),
+                    "traceability": req.get("traceability") or req.get("depends_on") or [],
+                })
+
+            formalized_meta = result.get("formalized", {})
+
             return {
                 "session_id": request.session_id,
                 "status": result.get("status", "analyzing"),
@@ -96,6 +117,11 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
                     "logical_gap_score": result.get("logical_gap_score"),
                     "issues_found": len(result.get("smells", [])),
                 },
+                # Include requirements inline so the frontend needs only ONE call
+                "iso_requirements": iso_requirements,
+                "total_requirements": len(iso_requirements),
+                "completeness_score": formalized_meta.get("completeness_score", 0.0),
+                "ready_for_export": formalized_meta.get("ready_for_export", False),
             }
 
     except Exception as e:
@@ -104,30 +130,50 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
 
 
 @router.post("/clarify")
-async def clarify_requirements(response: ClarificationResponse):
+async def clarify_requirements(request: ClarifyRequest):
     """
     Submit clarifications in response to analysis questions.
-    Resumes the analysis workflow with user's answers.
+    Accepts {session_id, clarifications: {question_id: answer}} as sent by the frontend.
     """
     try:
-        logger.info(
-            f"Processing clarifications for session {response.session_id}")
+        logger.info(f"Processing clarifications for session {request.session_id}")
 
         agent = get_agent()
-        clarifications = {response.question_id: response.user_response}
+        result = await agent.resume_after_clarification(request.session_id, request.clarifications)
 
-        result = await agent.resume_after_clarification(
-            response.session_id,
-            clarifications
-        )
+        logger.info(f"Clarification processed for session {request.session_id}")
 
-        logger.info(
-            f"Clarification processed for session {response.session_id}")
+        # Include updated requirements in the response
+        raw_reqs = result.get("requirements", [])
+        iso_requirements = []
+        for i, req in enumerate(raw_reqs, 1):
+            if not isinstance(req, dict):
+                continue
+            iso_requirements.append({
+                "requirement_id": req.get("requirement_id") or f"REQ-{i:04d}",
+                "title": req.get("title") or "Untitled Requirement",
+                "shall_statement": req.get("shall_statement") or "The system shall meet this requirement.",
+                "rationale": req.get("rationale") or "",
+                "acceptance_criteria": req.get("acceptance_criteria") or [],
+                "priority": req.get("priority") or "Medium",
+                "category": req.get("category"),
+                "traceability": req.get("traceability") or req.get("depends_on") or [],
+            })
 
         return {
-            "session_id": response.session_id,
+            "session_id": request.session_id,
             "status": result.get("status"),
             "interrupt_needed": result.get("interrupt_needed", False),
+            "clarification_questions": result.get("clarification_questions"),
+            "analysis_summary": {
+                "smell_score": result.get("smell_score"),
+                "logical_gap_score": result.get("logical_gap_score"),
+                "issues_found": len(result.get("smells", [])),
+            },
+            "iso_requirements": iso_requirements,
+            "total_requirements": len(iso_requirements),
+            "completeness_score": result.get("formalized", {}).get("completeness_score", 0.0),
+            "ready_for_export": result.get("formalized", {}).get("ready_for_export", False),
         }
 
     except Exception as e:
@@ -234,7 +280,8 @@ async def upload_document(file: UploadFile = File(...)):
 # ============ Formalization Endpoints ============
 
 @router.post("/formalize", response_model=FormalizedRequirement)
-async def formalize_requirements(session_id: str):
+async def formalize_requirements(request: FormalizeRequest):
+    session_id = request.session_id
     try:
         logger.info(f"Retrieving requirements from memory for session {session_id}")
 
@@ -245,9 +292,11 @@ async def formalize_requirements(session_id: str):
         if not state.values:
             raise HTTPException(status_code=404, detail="No data found for this session ID")
 
-        # Guard: only return data once the workflow has reached a terminal state
+        # Return partial data for in-progress sessions so the live panel can populate
+        # incrementally; only hard-block on truly unknown/unstarted statuses.
         current_status = state.values.get("status", "")
-        if current_status not in ("formal_draft", "export_ready", "clarified"):
+        terminal_or_partial = ("formal_draft", "export_ready", "clarified", "analyzing", "needs_clarification")
+        if current_status not in terminal_or_partial:
             raise HTTPException(
                 status_code=409,
                 detail=f"Analysis still in progress (status={current_status}). Retry after it completes."

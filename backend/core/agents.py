@@ -562,13 +562,14 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
     
     def _consolidate_results_node(self, state: AgentState) -> AgentState:
         """
-        Consolidate results from parallel processing.
-        
-        This node runs after detect_smells, analyze_logic, and formalize complete.
-        It merges their outputs and prepares for the interrupt decision.
+        Consolidate results and sync interrupt_needed with the routing logic.
+
+        Must run BEFORE _should_interrupt so the final state reflects the actual
+        decision that will be taken — otherwise the API response and the routing
+        disagree (e.g. gap triggers questions but state still says interrupt=False).
         """
         logger.info("Executing: Consolidate Results Node")
-        
+
         # Ensure all critical fields are present
         if "smell_score" not in state:
             state["smell_score"] = 0.0
@@ -578,46 +579,92 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
             state["requirements"] = []
         if "smells" not in state:
             state["smells"] = []
-        
-        logger.info(f"Consolidated state: smell_score={state.get('smell_score'):.2f}, requirements={len(state.get('requirements', []))}")
-        
+
+        # Keep interrupt_needed in sync with _should_interrupt's logic so callers
+        # reading state (API endpoints, WebSocket) see the correct value.
+        smell_score = state.get("smell_score", 0.0)
+        logical_gap_score = state.get("logical_gap_score", 0.0)
+        interrupt_needed = (
+            smell_score >= settings.SMELL_SCORE_THRESHOLD
+            or logical_gap_score >= settings.LOGICAL_GAP_THRESHOLD
+        )
+        state["interrupt_needed"] = interrupt_needed
+
+        # Also keep ready_for_export consistent with updated interrupt flag
+        if "formalized" in state and isinstance(state["formalized"], dict):
+            state["formalized"]["ready_for_export"] = (
+                bool(state.get("requirements")) and not interrupt_needed
+            )
+
+        logger.info(
+            f"Consolidated: smell={smell_score:.2f}, gap={logical_gap_score:.2f}, "
+            f"interrupt={interrupt_needed}, reqs={len(state.get('requirements', []))}"
+        )
         return state
     
     # ---- Helper Methods ----
     
+    # Maps keywords the LLM may produce to our enum values
+    _SMELL_KEYWORD_MAP = {
+        "ambiguous": RequirementSmell.AMBIGUOUS,
+        "vague": RequirementSmell.AMBIGUOUS,
+        "imprecise": RequirementSmell.AMBIGUOUS,
+        "incomplete": RequirementSmell.INCOMPLETE,
+        "missing": RequirementSmell.INCOMPLETE,
+        "infeasible": RequirementSmell.INFEASIBLE,
+        "impossible": RequirementSmell.INFEASIBLE,
+        "conflicting": RequirementSmell.CONFLICTING,
+        "contradiction": RequirementSmell.CONFLICTING,
+        "unmeasurable": RequirementSmell.UNMEASURABLE,
+        "no metric": RequirementSmell.UNMEASURABLE,
+        "scope": RequirementSmell.VAGUE_SCOPE,
+        "rationale": RequirementSmell.MISSING_RATIONALE,
+        "justification": RequirementSmell.MISSING_RATIONALE,
+    }
+
+    def _map_smell_type(self, raw: str) -> RequirementSmell:
+        """Map a verbose LLM string to a RequirementSmell enum value."""
+        lower = raw.lower()
+        for keyword, enum_val in self._SMELL_KEYWORD_MAP.items():
+            if keyword in lower:
+                return enum_val
+        # Try exact enum match as fallback
+        try:
+            return RequirementSmell(raw.lower())
+        except ValueError:
+            return RequirementSmell.AMBIGUOUS
+
     def _parse_smell_response(
         self, llm_response: str, original_text: str
     ) -> List[RequirementSmellAnalysis]:
         """Parse LLM response into RequirementSmellAnalysis objects."""
+        import json
+        import re
+
         smells = []
-        
         try:
-            # Extract JSON from response
-            import json
-            import re
-            
             json_match = re.search(r'\[.*\]', llm_response, re.DOTALL)
             if json_match:
                 smells_data = json.loads(json_match.group())
                 for smell_data in smells_data:
+                    raw_type = smell_data.get("type", "ambiguous")
                     smell = RequirementSmellAnalysis(
-                        smell_type=smell_data.get("type", RequirementSmell.AMBIGUOUS),
+                        smell_type=self._map_smell_type(raw_type),
                         severity=float(smell_data.get("severity", 0.5)),
                         location=smell_data.get("location", original_text[:50]),
                         recommendation=smell_data.get("recommendation", "Clarify requirement"),
                     )
                     smells.append(smell)
-        
+
         except Exception as e:
             logger.warning(f"Error parsing smell response: {str(e)}")
-            # Return default ambiguity smell
             smells.append(RequirementSmellAnalysis(
                 smell_type=RequirementSmell.AMBIGUOUS,
                 severity=0.5,
                 location=original_text[:50],
                 recommendation="Please clarify the requirement",
             ))
-        
+
         return smells
     
     def _parse_questions_response(self, llm_response: str) -> List[ClarificationQuestion]:

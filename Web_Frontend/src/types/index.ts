@@ -30,7 +30,7 @@ export interface ClarificationQuestion {
 
 export interface AnalysisState {
   session_id: string;
-  status: 'analyzing' | 'needs_clarification' | 'formal_draft' | 'export_ready';
+  status: 'pending' | 'analyzing' | 'needs_clarification' | 'formal_draft' | 'export_ready';
   interrupt_needed: boolean;
   clarification_questions: ClarificationQuestion[] | null;
   analysis_summary?: {
@@ -38,6 +38,11 @@ export interface AnalysisState {
     logical_gap_score: number | null;
     issues_found: number;
   };
+  // Inline requirements returned by /analyze and /clarify — no second /formalize call needed
+  iso_requirements?: ISORequirement[];
+  total_requirements?: number;
+  completeness_score?: number;
+  ready_for_export?: boolean;
 }
 
 export interface FormalizedRequirement {

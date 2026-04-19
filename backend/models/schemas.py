@@ -45,10 +45,16 @@ class AnalyzeRequirementsRequest(BaseModel):
 
 
 class ClarificationResponse(BaseModel):
-    """User response to clarification question."""
+    """User response to clarification question (single Q&A, kept for WS compatibility)."""
     session_id: str = Field(..., description="Session ID")
     question_id: str = Field(..., description="ID of the question being answered")
     user_response: str = Field(..., description="User's clarification response")
+
+
+class ClarifyRequest(BaseModel):
+    """Bulk clarification request sent by the frontend REST client."""
+    session_id: str = Field(..., description="Session ID")
+    clarifications: Dict[str, str] = Field(..., description="Map of question_id → user answer")
 
 
 class ExportRequirementRequest(BaseModel):
@@ -63,6 +69,11 @@ class StreamAudioRequest(BaseModel):
     session_id: str = Field(..., description="Session ID")
     context_file_path: Optional[str] = Field(None, description="Optional PDF for context injection")
     language: str = Field("en", description="Language code")
+
+
+class FormalizeRequest(BaseModel):
+    """Request to retrieve formalized requirements for a session."""
+    session_id: str = Field(..., description="Session ID")
 
 
 # ============ Response Models ============
