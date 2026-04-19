@@ -468,8 +468,18 @@ Format as JSON: [{{\"question_id\": \"q1\", \"question\": \"...\", \"context\": 
         # Enhanced ISO 29148 formatting prompt
         context_header = "CONTEXT DOCUMENTS:\n" if context_text else ""
         clarifications_header = "CLARIFICATIONS PROVIDED:\n" if clarifications_text else ""
-        
-        formalize_prompt = f"""You are an ISO 29148 requirements specialist. Convert the following requirement into formally compliant ISO 29148 format.
+        formalize_prompt = f"""
+System Role:
+You are a Senior Requirements Engineer specialized in ISO 29148 standards. Your task is to perform "Requirement Atomization." You will take raw, messy stakeholder input and break it into discrete, formalized requirements.
+
+The Rules of Atomization:
+One Goal per Requirement: If a sentence contains "and" or multiple verbs, split it into two or more separate requirements.
+Remove Subjectivity: Replace "fast," "easy," "user-friendly," and "scalable" with placeholders for measurable constraints (e.g., [Performance Constraint]).
+The "Shall" Template: Every requirement must follow this structure:
+[Entity] shall [Action] [Object] [Condition/Constraint]
+Comma Separation: Treat commas as potential logical breaks for new requirements if they introduce a new action or object.
+
+You are an ISO 29148 requirements specialist. Convert the following requirement into formally compliant ISO 29148 format.
 
 ORIGINAL REQUIREMENT:
 {input_text}
@@ -478,7 +488,7 @@ ORIGINAL REQUIREMENT:
 
 {clarifications_header}{clarifications_text if clarifications_text else ''}
 
-TASK: Create one or more ISO 29148 compliant requirements from the input.
+TASK: If the input contains multiple requirements, requests, or features (including compound or multi-part sentences), split them into separate ISO 29148 compliant requirements. Each distinct user need or feature should become its own requirement in the output array.
 
 ISO 29148 REQUIREMENTS:
 1. Each requirement MUST use imperative "shall" language
@@ -489,19 +499,19 @@ ISO 29148 REQUIREMENTS:
 
 OUTPUT FORMAT (JSON array):
 [
-  {{
-    "title": "Clear, concise title (< 80 chars)",
-    "shall_statement": "The system shall [verb] [object] [constraint].",
-    "rationale": "Business justification explaining why this requirement exists",
-    "acceptance_criteria": [
-      "Specific, measurable acceptance criterion 1",
-      "Specific, measurable acceptance criterion 2",
-      "Specific, measurable acceptance criterion 3"
-    ],
-    "priority": "High|Medium|Low",
-    "category": "Functional|Non-functional|Interface",
-    "depends_on": []
-  }}
+    {{
+        "title": "Clear, concise title (< 80 chars)",
+        "shall_statement": "The system shall [verb] [object] [constraint].",
+        "rationale": "Business justification explaining why this requirement exists",
+        "acceptance_criteria": [
+            "Specific, measurable acceptance criterion 1",
+            "Specific, measurable acceptance criterion 2",
+            "Specific, measurable acceptance criterion 3"
+        ],
+        "priority": "High|Medium|Low",
+        "category": "Functional|Non-functional|Interface",
+        "depends_on": []
+    }}
 ]
 
 OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
@@ -509,7 +519,7 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
         
         try:
             formalize_response = self.formalize_llm.invoke(formalize_prompt)
-            logger.debug(f"LLM formalization response: {formalize_response[:200]}")
+            logger.info(f"LLM formalization response: {formalize_response}")
             
             # Parse JSON response
             iso_requirements = self._parse_formalize_response(formalize_response)
@@ -724,8 +734,11 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
             import json
             import re
             
-            # Clean up response
+            # Clean up response - remove markdown code blocks
             cleaned_response = llm_response.strip()
+            # Remove ```json or ``` markers
+            cleaned_response = re.sub(r'```json\s*', '', cleaned_response)
+            cleaned_response = re.sub(r'```\s*', '', cleaned_response)
             
             # Try to parse as valid JSON array first
             try:
@@ -734,14 +747,30 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                     requirements = parsed
                     logger.info(f"Parsed {len(requirements)} requirements from direct JSON parse")
                 elif isinstance(parsed, dict):
-                    requirements = [parsed]
-                    logger.info("Parsed 1 requirement from direct JSON parse")
+                    # Check if it's wrapped in a "requirements" key
+                    if "requirements" in parsed:
+                        requirements = parsed["requirements"]
+                        logger.info(f"Parsed {len(requirements)} requirements from dict with requirements key")
+                    else:
+                        requirements = [parsed]
+                        logger.info("Parsed 1 requirement from direct JSON parse")
             except json.JSONDecodeError:
-                # Try extracting JSON array from response
-                json_match = re.search(r'\[.*\]', cleaned_response, re.DOTALL)
+                # Try extracting JSON array from response (handle markdown-wrapped arrays)
+                # Match array that may be inside markdown code blocks
+                json_match = re.search(r'\[[\s\S]*\]', cleaned_response)
                 if json_match:
-                    requirements = json.loads(json_match.group())
-                    logger.info(f"Parsed {len(requirements)} requirements from extracted JSON array")
+                    try:
+                        requirements = json.loads(json_match.group())
+                        logger.info(f"Parsed {len(requirements)} requirements from extracted JSON array")
+                    except json.JSONDecodeError:
+                        # Try to find each requirement object individually
+                        req_matches = re.findall(r'\{[^{}]*"title"[^{}]*\}', cleaned_response)
+                        for match in req_matches:
+                            try:
+                                requirements.append(json.loads(match))
+                            except:
+                                pass
+                        logger.info(f"Parsed {len(requirements)} requirements from individual objects")
                 else:
                     # Try to extract single JSON object
                     json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
