@@ -10,3 +10,4 @@ export { SmellMeter } from './SmellMeter';
 export { RequirementFeed } from './RequirementFeed';
 export { WaveformVisualizer } from './WaveformVisualizer';
 export { RequirementCard } from './RequirementCard';
+export { DocumentUpload } from './DocumentUpload';

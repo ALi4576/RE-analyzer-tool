@@ -34,9 +34,12 @@ class APIClient {
 
   // Analysis Endpoints
   async analyzeRequirements(
-    request: AnalyzeRequirementsRequest
+    request: AnalyzeRequirementsRequest,
+    options: { signal?: AbortSignal } = {}
   ): Promise<AnalysisState> {
-    const { data } = await this.client.post('/analyze', request);
+    const { data } = await this.client.post('/analyze', request, {
+      signal: options.signal,
+    });
     return data;
   }
 
@@ -48,9 +51,14 @@ class APIClient {
   }
 
   async getFormalizedRequirements(
-    sessionId: string
+    sessionId: string,
+    options: { signal?: AbortSignal } = {}
   ): Promise<FormalizedRequirement> {
-    const { data } = await this.client.post('/formalize', { session_id: sessionId });
+    const { data } = await this.client.post(
+      '/formalize',
+      { session_id: sessionId },
+      { signal: options.signal }
+    );
     return data;
   }
 

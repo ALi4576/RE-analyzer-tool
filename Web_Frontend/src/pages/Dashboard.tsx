@@ -7,6 +7,7 @@ import {
     SmellMeter,
     RequirementFeed,
     WaveformVisualizer,
+    DocumentUpload,
 } from '@/components/index';
 import { useRequirementStore, setupWebSocketListeners } from '@/store/requirementStore';
 import { generateSessionId } from '@/utils/helpers';
@@ -24,7 +25,6 @@ export const Dashboard: React.FC = () => {
         analyzeRequirements,
         analyzeRequirementsIncremental,
         clarifyRequirements,
-        fetchFormalizedRequirements,
         addNotification,
     } = useRequirementStore();
 
@@ -111,6 +111,11 @@ export const Dashboard: React.FC = () => {
                             sessionId={currentSession}
                             isLoading={loading}
                         />
+                    </div>
+
+                    {/* Document Upload */}
+                    <div>
+                        <DocumentUpload isLoading={loading} />
                     </div>
                 </div>
 
