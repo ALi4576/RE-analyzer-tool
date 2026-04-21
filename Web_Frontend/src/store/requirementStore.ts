@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   AnalysisState,
   FormalizedRequirement,
+  ISORequirement,
   UINotification,
 } from '@/types/index';
 import { apiClient } from '@/services/api';
@@ -11,6 +12,7 @@ interface RequirementStore {
   currentSession: string | null;
   analysisState: AnalysisState | null;
   formalizedRequirements: FormalizedRequirement | null;
+  documentContextPath: string | null;
   loading: boolean;
   // Lightweight flag for background/incremental updates — does NOT block typing.
   incrementalLoading: boolean;
@@ -30,6 +32,8 @@ interface RequirementStore {
   clarifyRequirements: (
     clarifications: Record<string, string>
   ) => Promise<void>;
+  updateRequirement: (id: string, changes: Partial<ISORequirement>) => void;
+  clarifyOneRequirement: (reqId: string, context: string) => Promise<void>;
   fetchFormalizedRequirements: () => Promise<void>;
   uploadAudio: (file: File) => Promise<void>;
   uploadDocument: (file: File) => Promise<void>;
@@ -49,6 +53,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
   currentSession: null,
   analysisState: null,
   formalizedRequirements: null,
+  documentContextPath: null,
   loading: false,
   incrementalLoading: false,
   error: null,
@@ -79,12 +84,20 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
       return;
     }
 
+    // Cancel any in-flight incremental so a stale background response can't
+    // overwrite interrupt_needed:true with false after the modal appears.
+    if (incrementalAbortController) {
+      incrementalAbortController.abort();
+      incrementalAbortController = null;
+    }
+    ++incrementalSeq;
+
     set({ loading: true, error: null });
     try {
       const result = await apiClient.analyzeRequirements({
         text,
         session_id: sessionId,
-        context_file_path: null,
+        context_file_path: get().documentContextPath,
       });
       set({ analysisState: result });
 
@@ -96,6 +109,10 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
             iso_requirements: result.iso_requirements,
             total_requirements: result.total_requirements ?? result.iso_requirements.length,
             completeness_score: result.completeness_score ?? 0,
+            // Smell-based quality score — primary metric for card/footer
+            // meters. Fall back to completeness for backends that have
+            // not yet been upgraded.
+            quality_score: result.quality_score ?? result.completeness_score ?? 0,
             ready_for_export: result.ready_for_export ?? false,
           },
         });
@@ -150,7 +167,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
         // Single call to /analyze — response now includes iso_requirements inline
         // so there is no second /formalize round-trip to race or abort.
         const analysis = await apiClient.analyzeRequirements(
-          { text, session_id: currentSession, context_file_path: null },
+          { text, session_id: currentSession, context_file_path: get().documentContextPath },
           { signal: controller.signal }
         );
 
@@ -166,6 +183,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
               iso_requirements: analysis.iso_requirements,
               total_requirements: analysis.total_requirements ?? analysis.iso_requirements.length,
               completeness_score: analysis.completeness_score ?? 0,
+              quality_score: analysis.quality_score ?? analysis.completeness_score ?? 0,
               ready_for_export: analysis.ready_for_export ?? false,
             },
           });
@@ -204,6 +222,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
             iso_requirements: result.iso_requirements,
             total_requirements: result.total_requirements ?? result.iso_requirements.length,
             completeness_score: result.completeness_score ?? 0,
+            quality_score: result.quality_score ?? result.completeness_score ?? 0,
             ready_for_export: result.ready_for_export ?? false,
           },
         });
@@ -219,6 +238,76 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
       addNotification({ type: 'error', message });
     } finally {
       set({ loading: false });
+    }
+  },
+
+  updateRequirement: (id: string, changes: Partial<ISORequirement>) => {
+    if (!id) return;
+    // Fire-and-forget PATCH to persist edit server-side for the session lifetime.
+    const { currentSession } = get();
+    if (currentSession) {
+      apiClient.patchRequirement(currentSession, id, changes as any).catch((err) => {
+        console.warn('[updateRequirement] backend patch failed:', err);
+      });
+    }
+    set((state) => {
+      const current = state.formalizedRequirements;
+      if (!current || !current.iso_requirements) return {} as any;
+
+      let matched = false;
+      const nextIsoRequirements = current.iso_requirements.map((req) => {
+        if (req.requirement_id === id || req.id === id) {
+          matched = true;
+          return { ...req, ...changes };
+        }
+        return req;
+      });
+
+      if (!matched) return {} as any;
+
+      // Keep the parallel `requirements` array in sync if the backend
+      // happened to populate it (some WS payloads mirror both fields).
+      const nextRequirements = current.requirements
+        ? current.requirements.map((req: any) => {
+            if (req?.requirement_id === id || req?.id === id) {
+              return { ...req, ...changes };
+            }
+            return req;
+          })
+        : current.requirements;
+
+      return {
+        formalizedRequirements: {
+          ...current,
+          iso_requirements: nextIsoRequirements,
+          requirements: nextRequirements,
+        },
+      };
+    });
+  },
+
+  clarifyOneRequirement: async (reqId: string, context: string) => {
+    const { currentSession, addNotification } = get();
+    if (!currentSession || !reqId) return;
+    try {
+      const result = await apiClient.clarifyOneRequirement(currentSession, reqId, context);
+      const improved: ISORequirement = result?.iso_requirements?.[0];
+      if (!improved) return;
+      set((state) => {
+        const current = state.formalizedRequirements;
+        if (!current?.iso_requirements) return {} as any;
+        return {
+          formalizedRequirements: {
+            ...current,
+            iso_requirements: current.iso_requirements.map((r) =>
+              r.requirement_id === reqId ? { ...r, ...improved } : r
+            ),
+          },
+        };
+      });
+      addNotification({ type: 'success', message: 'Requirement improved.' });
+    } catch (err: any) {
+      addNotification({ type: 'error', message: apiClient.getErrorMessage(err) });
     }
   },
 
@@ -268,6 +357,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
       currentSession: null,
       analysisState: null,
       formalizedRequirements: null,
+      documentContextPath: null,
       loading: false,
       incrementalLoading: false,
       error: null,
@@ -300,11 +390,15 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
     set({ loading: true, error: null, uploadProgress: 0 });
     try {
       const result = await apiClient.uploadDocument(file);
+      // Persist the server-side path so all subsequent analyzeRequirements
+      // calls can inject this document as context (was always null before).
+      if (result?.file_path) {
+        set({ documentContextPath: result.file_path });
+      }
       addNotification({
         type: 'success',
-        message: `Document uploaded: ${file.name}`,
+        message: `Document uploaded: ${file.name} — will be used as context`,
       });
-      // Store document path for context injection
       return result;
     } catch (error: any) {
       const message = apiClient.getErrorMessage(error);
@@ -316,8 +410,13 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
   },
 }));
 
+// Guard against duplicate listener registration (StrictMode double-mount, session re-init)
+let wsListenersRegistered = false;
+
 // Setup WebSocket event listeners
 export function setupWebSocketListeners() {
+  if (wsListenersRegistered) return;
+  wsListenersRegistered = true;
   // Listen for analysis updates (SCRIBE MODE)
   window.addEventListener('analysis_update', (event: any) => {
     const message = event.detail;
@@ -327,10 +426,17 @@ export function setupWebSocketListeners() {
     const requirements_list = message.requirements_list || [];
     const requirements_count = message.requirements_count || 0;
     const completeness_score = message.completeness_score || 0;
-    
-    console.log(`[Scribe Mode] Received ${requirements_count} requirements with completeness ${completeness_score.toFixed(2)}`);
+    // Smell-based quality — primary metric for the feed footer. Fall back
+    // to completeness so older backends (or the transitional deploy window)
+    // still render a meaningful value.
+    const quality_score =
+      typeof message.quality_score === 'number'
+        ? message.quality_score
+        : completeness_score;
+
+    console.log(`[Scribe Mode] Received ${requirements_count} requirements with completeness ${completeness_score.toFixed(2)}, quality ${quality_score.toFixed(2)}`);
     console.log('Store received analysis_update:', message);
-    
+
     // Update analysis state
     store.setAnalysisState({
       session_id: store.currentSession || '',
@@ -339,12 +445,13 @@ export function setupWebSocketListeners() {
       clarification_questions: message.clarification_questions || null,
       analysis_summary: message.analysis_summary || {},
     } as any);
-    
+
     // Update formalized requirements with requirements_list
     store.setFormalizedRequirements({
       total_requirements: requirements_count,
       ready_for_export: message.status === 'export_ready' || false,
       completeness_score: completeness_score,
+      quality_score: quality_score,
       requirements: requirements_list,
       iso_requirements: requirements_list,
     } as any);
@@ -359,10 +466,14 @@ export function setupWebSocketListeners() {
     const requirements_list = message.requirements_list || [];
     const requirements_count = message.requirements_count || 0;
     const completeness_score = message.completeness_score || 0;
-    
+    const quality_score =
+      typeof message.quality_score === 'number'
+        ? message.quality_score
+        : completeness_score;
+
     console.log(`[Scribe Mode] Clarification processed - ${requirements_count} requirements updated`);
     console.log('Store received clarification_processed:', message);
-    
+
     // Update analysis state
     store.setAnalysisState({
       session_id: store.currentSession || '',
@@ -371,12 +482,13 @@ export function setupWebSocketListeners() {
       clarification_questions: null,
       analysis_summary: message.analysis_summary || {},
     } as any);
-    
+
     // Update formalized requirements with requirements_list
     store.setFormalizedRequirements({
       total_requirements: requirements_count,
       ready_for_export: message.status === 'export_ready' || false,
       completeness_score: completeness_score,
+      quality_score: quality_score,
       requirements: requirements_list,
       iso_requirements: requirements_list,
     } as any);

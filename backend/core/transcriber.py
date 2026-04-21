@@ -63,27 +63,34 @@ class TranscriberEngine:
         self, audio_chunk: bytes, chunk_number: int = 0
     ) -> Optional[str]:
         """
-        Transcribe a single audio chunk from a stream (raw int16 PCM at 16kHz).
+        Transcribe a single audio chunk from a stream.
+
+        The browser's MediaRecorder produces a container-encoded blob (webm/mp4/ogg),
+        NOT raw PCM. We write the bytes to a temp file so faster-whisper can hand it
+        to ffmpeg for proper container decoding before transcription.
 
         Args:
-            audio_chunk: Raw PCM int16 audio bytes at 16 kHz
+            audio_chunk: Container-encoded audio bytes (webm, mp4, ogg, wav)
             chunk_number: Sequential chunk identifier
 
         Returns:
             Transcribed text (None if chunk too short or empty)
         """
-        try:
-            # Raw PCM from browser MediaRecorder is int16 — interpret correctly,
-            # then normalise to float32 in [-1, 1] as Whisper expects.
-            audio_data = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
+        import tempfile, os
 
-            # Minimum 500 ms of audio at 16 kHz = 8000 samples
-            if len(audio_data) < 8000:
-                logger.debug(f"Chunk {chunk_number} too short ({len(audio_data)} samples), skipping")
-                return None
+        # Minimum viable chunk: anything under ~1 KB is too short to transcribe
+        if len(audio_chunk) < 1024:
+            logger.debug(f"Chunk {chunk_number} too small ({len(audio_chunk)} bytes), skipping")
+            return None
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+                tmp.write(audio_chunk)
+                tmp_path = tmp.name
 
             segments, _ = self.model.transcribe(
-                audio_data,
+                tmp_path,
                 language="en",
                 beam_size=3,
                 temperature=0.0,
@@ -99,6 +106,9 @@ class TranscriberEngine:
         except Exception as e:
             logger.warning(f"Stream transcription error on chunk {chunk_number}: {str(e)}")
             return None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
     
     def transcribe_with_timestamps(
         self, file_path: str, language: Optional[str] = None

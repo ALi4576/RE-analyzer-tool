@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Header, NotificationContainer } from '@/components/index';
+import { NotificationContainer } from '@/components/index';
 import { Dashboard } from '@/pages/Dashboard';
 import { useRequirementStore } from '@/store/requirementStore';
 import { apiClient } from '@/services/api';
@@ -7,30 +7,24 @@ import { apiClient } from '@/services/api';
 function App() {
   const { notifications, removeNotification } = useRequirementStore();
 
-  // Check backend health on mount
+  // Probe backend health once on mount so dev sees connection status in console.
   useEffect(() => {
-    const checkHealth = async () => {
-      try {
-        await apiClient.getHealth();
-        console.log('✓ Backend connected');
-      } catch (error) {
-        console.error('✗ Backend connection failed:', error);
-      }
-    };
-
-    checkHealth();
+    apiClient
+      .getHealth()
+      .then(() => console.log('Backend connected'))
+      .catch((err) => console.error('Backend connection failed:', err));
   }, []);
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <Header />
+    <div
+      className="min-h-screen"
+      style={{ backgroundColor: 'var(--color-bg)', color: 'var(--color-text-primary)' }}
+    >
       <NotificationContainer
         notifications={notifications}
         onClose={removeNotification}
       />
-      <main>
-        <Dashboard />
-      </main>
+      <Dashboard />
     </div>
   );
 }

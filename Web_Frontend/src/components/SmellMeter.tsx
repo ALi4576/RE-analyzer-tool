@@ -1,67 +1,138 @@
 import React from 'react';
-import { AlertCircle } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { CheckCircle2, AlertTriangle, AlertOctagon } from 'lucide-react';
 
 interface SmellMeterProps {
-  smellScore: number; // 0-1 range
+  smellScore: number;
   label?: string;
 }
 
-export const SmellMeter: React.FC<SmellMeterProps> = ({ 
-  smellScore, 
-  label = 'Quality Score'
-}) => {
-  // Determine color based on score (inverted: high score = bad)
-  // 0-0.3: Green (good)
-  // 0.3-0.6: Yellow (warning)
-  // 0.6-1.0: Red (critical)
-  
-  const getColor = () => {
-    if (smellScore < 0.3) return { bg: 'bg-emerald-500', text: 'text-emerald-700', label: 'Good' };
-    if (smellScore < 0.6) return { bg: 'bg-amber-500', text: 'text-amber-700', label: 'Warning' };
-    return { bg: 'bg-red-500', text: 'text-red-700', label: 'Critical' };
-  };
+type Tier = {
+  label: string;
+  colorVar: string;
+  subtleVar: string;
+  textVar: string;
+  borderVar: string;
+  icon: React.ReactNode;
+  description: string;
+};
 
-  const color = getColor();
-  const percentage = Math.min(smellScore * 100, 100);
+function resolveTier(score: number): Tier {
+  if (score >= 0.7) {
+    return {
+      label: 'Good',
+      colorVar: 'var(--color-success)',
+      subtleVar: 'var(--color-success-subtle)',
+      textVar: 'var(--color-success-text)',
+      borderVar: 'var(--color-success-subtle-border)',
+      icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+      description: 'Requirement is well-defined.',
+    };
+  }
+  if (score >= 0.4) {
+    return {
+      label: 'Warning',
+      colorVar: 'var(--color-warning)',
+      subtleVar: 'var(--color-warning-subtle)',
+      textVar: 'var(--color-warning-text)',
+      borderVar: 'var(--color-warning-subtle-border)',
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      description: 'Ambiguities detected — review recommended.',
+    };
+  }
+  return {
+    label: 'Critical',
+    colorVar: 'var(--color-danger)',
+    subtleVar: 'var(--color-danger-subtle)',
+    textVar: 'var(--color-danger-text)',
+    borderVar: 'var(--color-danger-subtle-border)',
+    icon: <AlertOctagon className="w-3.5 h-3.5" />,
+    description: 'Multiple quality issues — clarification needed.',
+  };
+}
+
+export const SmellMeter: React.FC<SmellMeterProps> = ({
+  smellScore,
+  label = 'Quality score',
+}) => {
+  const clamped = Math.min(Math.max(smellScore, 0), 1);
+  const quality = 1 - clamped;
+  const pct = quality * 100;
+  const tier = resolveTier(quality);
 
   return (
-    <div className="card p-4 bg-neutral-50">
+    <div
+      className="p-4"
+      style={{
+        backgroundColor: 'var(--color-surface-sunken)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 'var(--radius-lg)',
+      }}
+    >
+      {/* Header row */}
       <div className="flex items-center justify-between mb-3">
-        <label className="text-sm font-medium text-neutral-600">{label}</label>
-        <span className={`text-xs font-semibold px-2 py-1 rounded ${color.text} bg-opacity-10`}>
-          {color.label}
-        </span>
-      </div>
-
-      {/* Animated Gauge */}
-      <div className="relative h-8 bg-gradient-to-r from-emerald-200 via-amber-200 to-red-200 rounded-full overflow-hidden shadow-inner">
-        <div
-          className={`h-full transition-all duration-500 ease-out ${color.bg} rounded-full flex items-center justify-end pr-2`}
-          style={{ width: `${percentage}%` }}
+        <span
+          className="text-xs font-semibold uppercase tracking-wider"
+          style={{ color: 'var(--color-text-secondary)' }}
         >
-          {percentage > 15 && (
-            <span className="text-xs font-bold text-white drop-shadow-md">
-              {(smellScore * 100).toFixed(0)}%
-            </span>
-          )}
-        </div>
+          {label}
+        </span>
+        <motion.span
+          key={tier.label}
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ type: 'spring', damping: 22, stiffness: 220 }}
+          className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full"
+          style={{
+            backgroundColor: tier.subtleVar,
+            color: tier.textVar,
+            border: `1px solid ${tier.borderVar}`,
+          }}
+        >
+          {tier.icon}
+          {tier.label}
+        </motion.span>
       </div>
 
-      {/* Feedback Text */}
-      <div className="mt-2 flex items-start gap-2">
-        {smellScore < 0.3 ? (
-          <p className="text-xs text-emerald-700">✓ Requirement is well-defined and clear</p>
-        ) : smellScore < 0.6 ? (
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-3 h-3 text-amber-600 flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-700">Some ambiguities detected. Review and clarify.</p>
-          </div>
-        ) : (
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-3 h-3 text-red-600 flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-red-700">Multiple quality issues. Requires clarification.</p>
-          </div>
-        )}
+      {/* Progress track */}
+      <div
+        className="relative h-2 w-full overflow-hidden"
+        style={{
+          backgroundColor: 'var(--color-border)',
+          borderRadius: 'var(--radius-full)',
+        }}
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label}
+      >
+        <motion.div
+          className="absolute inset-y-0 left-0"
+          style={{
+            backgroundColor: tier.colorVar,
+            borderRadius: 'var(--radius-full)',
+          }}
+          initial={{ width: 0 }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+        />
+      </div>
+
+      {/* Footer row */}
+      <div className="flex items-center justify-between mt-2.5">
+        <p className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          {tier.description}
+        </p>
+        <motion.span
+          key={pct.toFixed(0)}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="text-xs font-semibold font-mono"
+          style={{ color: tier.textVar }}
+        >
+          {pct.toFixed(0)}%
+        </motion.span>
       </div>
     </div>
   );

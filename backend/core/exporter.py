@@ -1,9 +1,10 @@
 """
-Export module for converting requirements to Jira/Trello tickets.
-Handles ticket creation and updates via API integration.
+Export module for converting requirements to Jira/Trello tickets and PDF.
 """
 from typing import List, Dict, Optional, Any
 import uuid
+import os
+import tempfile
 from datetime import datetime
 from config import settings
 from models.schemas import (
@@ -240,6 +241,162 @@ class TrelloExporter:
 **Requirement ID:** {requirement.requirement_id}
 """
         return description.strip()
+
+
+class PdfExporter:
+    """Generate a formatted ISO 29148 requirements PDF."""
+
+    def export_requirements(
+        self, iso_requirements: List[ISORequirement], session_id: str = ""
+    ) -> str:
+        """
+        Generate a PDF from requirements and return the file path.
+
+        Args:
+            iso_requirements: List of ISO requirements
+            session_id: Used for the output filename
+
+        Returns:
+            Absolute path to the generated PDF file
+        """
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            HRFlowable, PageBreak,
+        )
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
+        out_dir = os.path.join(settings.UPLOAD_DIR, session_id or "pdf_export")
+        os.makedirs(out_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_path = os.path.join(out_dir, f"requirements_{timestamp}.pdf")
+
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=A4,
+            leftMargin=2 * cm,
+            rightMargin=2 * cm,
+            topMargin=2 * cm,
+            bottomMargin=2 * cm,
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "Title", parent=styles["Heading1"],
+            fontSize=20, spaceAfter=6, textColor=colors.HexColor("#1e3a5f"),
+            alignment=TA_CENTER,
+        )
+        subtitle_style = ParagraphStyle(
+            "Subtitle", parent=styles["Normal"],
+            fontSize=10, textColor=colors.HexColor("#555555"),
+            alignment=TA_CENTER, spaceAfter=20,
+        )
+        req_title_style = ParagraphStyle(
+            "ReqTitle", parent=styles["Heading2"],
+            fontSize=13, textColor=colors.HexColor("#1e3a5f"),
+            spaceBefore=14, spaceAfter=4,
+        )
+        label_style = ParagraphStyle(
+            "Label", parent=styles["Normal"],
+            fontSize=9, textColor=colors.HexColor("#777777"),
+            fontName="Helvetica-Bold", spaceBefore=6,
+        )
+        body_style = ParagraphStyle(
+            "Body", parent=styles["Normal"],
+            fontSize=10, leading=14, spaceAfter=2,
+        )
+        badge_style = ParagraphStyle(
+            "Badge", parent=styles["Normal"],
+            fontSize=9, textColor=colors.white,
+            fontName="Helvetica-Bold",
+        )
+
+        story = []
+
+        # ── Cover ──────────────────────────────────────────────────────────
+        story.append(Spacer(1, 2 * cm))
+        story.append(Paragraph("Software Requirements Specification", title_style))
+        story.append(Paragraph(
+            f"ISO 29148 Compliant · Generated {datetime.now().strftime('%B %d, %Y %H:%M')}",
+            subtitle_style,
+        ))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#1e3a5f")))
+        story.append(Spacer(1, 0.4 * cm))
+
+        # Summary table
+        summary_data = [
+            ["Total Requirements", str(len(iso_requirements))],
+            ["Standard", "ISO/IEC/IEEE 29148:2018"],
+            ["Session ID", session_id or "—"],
+        ]
+        summary_table = Table(summary_data, colWidths=[5 * cm, 10 * cm])
+        summary_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#1e3a5f")),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(summary_table)
+        story.append(PageBreak())
+
+        # ── Requirements ───────────────────────────────────────────────────
+        priority_colors = {
+            "High": colors.HexColor("#c0392b"),
+            "Medium": colors.HexColor("#e67e22"),
+            "Low": colors.HexColor("#27ae60"),
+        }
+
+        for req in iso_requirements:
+            req_id = getattr(req, "requirement_id", None) or (req.get("requirement_id") if isinstance(req, dict) else "REQ-????")
+            title = getattr(req, "title", None) or (req.get("title") if isinstance(req, dict) else "Untitled")
+            shall = getattr(req, "shall_statement", None) or (req.get("shall_statement") if isinstance(req, dict) else "")
+            rationale = getattr(req, "rationale", None) or (req.get("rationale") if isinstance(req, dict) else "")
+            criteria = getattr(req, "acceptance_criteria", None) or (req.get("acceptance_criteria") if isinstance(req, dict) else [])
+            priority = getattr(req, "priority", None) or (req.get("priority") if isinstance(req, dict) else "Medium")
+            category = getattr(req, "category", None) or (req.get("category") if isinstance(req, dict) else "Functional")
+
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#dddddd")))
+            story.append(Paragraph(f"{req_id} — {title}", req_title_style))
+
+            # Priority badge via coloured table cell
+            p_color = priority_colors.get(str(priority), colors.HexColor("#888888"))
+            badge_table = Table([[priority or "Medium"]], colWidths=[2.2 * cm])
+            badge_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), p_color),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("ROUNDEDCORNERS", [3, 3, 3, 3]),
+            ]))
+            story.append(badge_table)
+            story.append(Spacer(1, 0.2 * cm))
+
+            story.append(Paragraph("SHALL STATEMENT", label_style))
+            story.append(Paragraph(str(shall), body_style))
+
+            if rationale:
+                story.append(Paragraph("RATIONALE", label_style))
+                story.append(Paragraph(str(rationale), body_style))
+
+            if criteria:
+                story.append(Paragraph("ACCEPTANCE CRITERIA", label_style))
+                for criterion in (criteria if isinstance(criteria, list) else [criteria]):
+                    story.append(Paragraph(f"• {criterion}", body_style))
+
+            story.append(Paragraph("CATEGORY", label_style))
+            story.append(Paragraph(str(category), body_style))
+            story.append(Spacer(1, 0.3 * cm))
+
+        doc.build(story)
+        logger.info(f"PDF export written to {pdf_path}")
+        return pdf_path
 
 
 class ExportManager:

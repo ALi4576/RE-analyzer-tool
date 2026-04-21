@@ -150,23 +150,43 @@ class StreamingAnalysisHandler:
                 except Exception as e:
                     logger.warning(f"Failed to load context: {str(e)}")
             
-            # Accumulate transcribed text
+            # Accumulate transcribed text and raw audio bytes.
+            # Raw audio must be accumulated because MediaRecorder only puts the
+            # webm EBML header in chunk 0 — later chunks are continuation clusters
+            # and are NOT valid standalone webm files. Transcribing them individually
+            # fails with "Invalid data found when processing input". We transcribe
+            # the full accumulated buffer (which is a valid webm) every N chunks.
             accumulated_text = ""
+            accumulated_audio = bytearray()
             chunk_count = 0
-            
+            TRANSCRIBE_EVERY = 20  # chunks (~2 seconds at typical MediaRecorder intervals)
+
             while True:
                 message = await self.ws_manager.receive_message(session_id)
                 if not message:
                     break
-                
+
                 msg_type = message.get("type")
-                
+
                 if msg_type == "audio_chunk":
-                    accumulated_text = await self._handle_audio_chunk(session_id, message, context_docs, accumulated_text)
+                    accumulated_text, accumulated_audio = await self._handle_audio_chunk(
+                        session_id, message, context_docs,
+                        accumulated_text, accumulated_audio, TRANSCRIBE_EVERY,
+                    )
                     chunk_count += 1
-                    
+
                 elif msg_type == "finalize":
                     logger.info(f"Finalizing stream for session {session_id}")
+                    # Transcribe the complete accumulated audio buffer one last time
+                    if accumulated_audio:
+                        final_text = await asyncio.to_thread(
+                            self.transcriber.transcribe_stream,
+                            bytes(accumulated_audio), -1,
+                        )
+                        if final_text:
+                            accumulated_text = final_text
+                    if accumulated_text.strip():
+                        await self._run_analysis(session_id, accumulated_text, context_docs)
                     break
                     
                 elif msg_type == "clarification_response":
@@ -185,40 +205,38 @@ class StreamingAnalysisHandler:
             logger.info(f"GPU stats: {self.gpu_manager.get_stats()}")
     
     async def _handle_audio_chunk(
-        self, session_id: str, message: Dict, context_docs: List, accumulated_text: str
-    ) -> str:
+        self,
+        session_id: str,
+        message: Dict,
+        context_docs: List,
+        accumulated_text: str,
+        accumulated_audio: bytearray,
+        transcribe_every: int,
+    ):
         """
-        Handle incoming audio chunk.
+        Append audio chunk to the session buffer; transcribe the full buffer
+        every `transcribe_every` chunks so Whisper always receives a valid webm.
 
-        Returns the updated accumulated_text so the caller can persist it;
-        Python strings are immutable so parameter mutation would be a no-op.
-
-        Args:
-            session_id: Session ID
-            message: Message containing audio data
-            context_docs: Context documents
-            accumulated_text: Current accumulated text
-
-        Returns:
-            Updated accumulated text (original + new transcription)
+        Returns (updated_text, updated_audio_buffer).
         """
         try:
             chunk_data = message.get("data")
             chunk_number = message.get("chunk_number", 0)
 
-            # Decode base64 audio if needed
-            if isinstance(chunk_data, str):
-                audio_bytes = base64.b64decode(chunk_data)
-            else:
-                audio_bytes = chunk_data
+            audio_bytes = base64.b64decode(chunk_data) if isinstance(chunk_data, str) else chunk_data
+            accumulated_audio.extend(audio_bytes)
 
-            # Transcribe audio chunk
-            transcription = self.transcriber.transcribe_stream(audio_bytes, chunk_number)
+            # Transcribe the FULL buffer every N chunks (not the individual chunk)
+            transcription = None
+            if chunk_number > 0 and chunk_number % transcribe_every == 0:
+                transcription = await asyncio.to_thread(
+                    self.transcriber.transcribe_stream,
+                    bytes(accumulated_audio), chunk_number,
+                )
+                if transcription:
+                    # Full buffer transcription replaces accumulated text (it's a superset)
+                    accumulated_text = transcription
 
-            if transcription:
-                accumulated_text = accumulated_text + " " + transcription
-
-            # Send chunk acknowledgment
             await self.ws_manager.send_message(
                 session_id,
                 {
@@ -229,11 +247,6 @@ class StreamingAnalysisHandler:
                 },
             )
 
-            # Trigger analysis every 50 characters (sliding window)
-            if len(accumulated_text) > 0 and len(accumulated_text) % 50 == 0:
-                logger.info(f"Triggering incremental analysis for session {session_id} at {len(accumulated_text)} chars")
-                await self._run_analysis(session_id, accumulated_text, context_docs)
-
         except Exception as e:
             logger.error(f"Audio chunk handling error: {str(e)}")
             await self.ws_manager.send_message(
@@ -241,7 +254,7 @@ class StreamingAnalysisHandler:
                 {"type": "error", "message": f"Audio chunk error: {str(e)}"},
             )
 
-        return accumulated_text
+        return accumulated_text, accumulated_audio
     
     async def _run_analysis(self, session_id: str, text: str, context_docs: List):
         """Run analysis on accumulated text."""
@@ -258,7 +271,12 @@ class StreamingAnalysisHandler:
             requirements_list = result.get("requirements", [])
             formalized_data = result.get("formalized", {})
             completeness_score = formalized_data.get("completeness_score", 0)
-            
+            # Per-requirement smell-based quality — drives the frontend
+            # smell meter both per-card and in the feed footer. Falls back
+            # to completeness for backwards compatibility when the backend
+            # has not yet attached it (e.g. older sessions).
+            quality_score = formalized_data.get("quality_score", completeness_score)
+
             # Send analysis update with MANDATORY requirements_list field
             await self.ws_manager.send_message(
                 session_id,
@@ -266,32 +284,37 @@ class StreamingAnalysisHandler:
                     "type": "analysis_update",
                     "status": result.get("status", "analyzing"),
                     "interrupt_needed": result.get("interrupt_needed", False),
-                    
+
                     # MANDATORY FIELDS (SCRIBE MODE):
                     "requirements_list": requirements_list,  # NEVER NULL
                     "requirements_count": len(requirements_list),
                     "completeness_score": completeness_score,
-                    
+                    "quality_score": quality_score,
+
                     # SCORING INFO (SECONDARY):
                     "analysis_summary": {
                         "smell_score": result.get("smell_score", 0),
                         "logical_gap_score": result.get("logical_gap_score", 0),
                         "issues_found": len(result.get("smells", [])) if result.get("smells") else 0,
                     },
-                    
+
                     # CLARIFICATION IF NEEDED:
                     "clarification_questions": result.get("clarification_questions") or None,
                     "formalized": formalized_data,
                 },
             )
             
-            # If interruption needed, send clarification questions
-            if result.get("interrupt_needed") and result.get("clarification_questions"):
+            # If interruption needed, send clarification questions.
+            # We intentionally send the interrupt whenever interrupt_needed is True —
+            # even if the questions list is empty — so the frontend can react to the
+            # interrupt state instead of hanging waiting for an "interrupt" event that
+            # a malformed-LLM-JSON edge case might otherwise suppress.
+            if result.get("interrupt_needed"):
                 await self.ws_manager.send_message(
                     session_id,
                     {
                         "type": "interrupt",
-                        "clarification_questions": result.get("clarification_questions", []),
+                        "clarification_questions": result.get("clarification_questions") or [],
                         "requirements_list": requirements_list,  # Include in interrupt too
                         "requirements_count": len(requirements_list),
                     },
@@ -311,25 +334,27 @@ class StreamingAnalysisHandler:
             requirements_list = result.get("requirements", [])
             formalized_data = result.get("formalized", {})
             completeness_score = formalized_data.get("completeness_score", 0)
-            
+            quality_score = formalized_data.get("quality_score", completeness_score)
+
             await self.ws_manager.send_message(
                 session_id,
                 {
                     "type": "clarification_processed",
                     "status": result.get("status"),
-                    
+
                     # MANDATORY FIELDS (SCRIBE MODE):
                     "requirements_list": requirements_list,  # NEVER NULL
                     "requirements_count": len(requirements_list),
                     "completeness_score": completeness_score,
-                    
+                    "quality_score": quality_score,
+
                     # SCORING INFO:
                     "analysis_summary": {
                         "smell_score": result.get("smell_score", 0),
                         "logical_gap_score": result.get("logical_gap_score", 0),
                         "issues_found": len(result.get("smells", [])) if result.get("smells") else 0,
                     },
-                    
+
                     "formalized": formalized_data,
                 },
             )

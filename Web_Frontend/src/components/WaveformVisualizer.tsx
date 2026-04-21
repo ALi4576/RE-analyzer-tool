@@ -6,18 +6,22 @@ interface WaveformVisualizerProps {
   analyser?: AnalyserNode;
 }
 
+function cssVar(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
 export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
   isRecording,
   analyser,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>();
+  const animationRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (!isRecording || !analyser || !canvasRef.current) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
       return;
     }
 
@@ -33,15 +37,18 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
 
       analyser.getByteFrequencyData(dataArray);
 
-      // Clear canvas
-      ctx.fillStyle = 'rgba(248, 250, 252, 1)';
+      // Resolve colors on every frame so theme changes during recording also take effect.
+      const bg = cssVar('--color-surface-sunken', '#F8FAFC');
+      const lineColor = cssVar('--color-primary', '#2563EB');
+      const guideColor = cssVar('--color-border', '#E2E8F0');
+
+      ctx.fillStyle = bg;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Draw waveform
       const sliceWidth = (canvas.width * 1.0) / bufferLength;
       let x = 0;
 
-      ctx.strokeStyle = '#3b82f6';
+      ctx.strokeStyle = lineColor;
       ctx.lineWidth = 2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -50,22 +57,16 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
       for (let i = 0; i < bufferLength; i++) {
         const v = dataArray[i] / 128.0;
         const y = (v * canvas.height) / 2;
-
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
-        }
-
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
         x += sliceWidth;
       }
 
       ctx.lineTo(canvas.width, canvas.height / 2);
       ctx.stroke();
 
-      // Draw center line
-      ctx.strokeStyle = 'rgba(229, 231, 235, 0.5)';
-      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = guideColor;
+      ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(0, canvas.height / 2);
       ctx.lineTo(canvas.width, canvas.height / 2);
@@ -76,36 +77,67 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
     draw();
 
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
   }, [isRecording, analyser]);
 
   return (
-    <div className="card p-4 bg-neutral-50">
-      <div className="flex items-center gap-2 mb-3">
-        <div className={`flex items-center gap-2 ${isRecording ? 'text-red-600' : 'text-neutral-400'}`}>
-          <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-600 animate-pulse' : 'bg-neutral-400'}`}></div>
-          <span className="text-xs font-medium">
-            {isRecording ? 'Recording...' : 'Ready to Record'}
+    <div
+      className="p-3"
+      style={{
+        backgroundColor: 'var(--color-surface)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 'var(--radius-md)',
+      }}
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${isRecording ? 'animate-pulse' : ''}`}
+            style={{
+              backgroundColor: isRecording
+                ? 'var(--color-danger)'
+                : 'var(--color-text-muted)',
+            }}
+          />
+          <span
+            className="text-xs font-medium"
+            style={{
+              color: isRecording
+                ? 'var(--color-danger-text)'
+                : 'var(--color-text-secondary)',
+            }}
+          >
+            {isRecording ? 'Recording' : 'Ready'}
           </span>
         </div>
         {isRecording && (
-          <span className="text-xs text-neutral-500 ml-auto">Live Waveform</span>
+          <span
+            className="text-xs ml-auto"
+            style={{ color: 'var(--color-text-muted)' }}
+          >
+            Live waveform
+          </span>
         )}
       </div>
 
-      {/* Canvas for waveform */}
       <canvas
         ref={canvasRef}
         width={300}
-        height={80}
-        className="w-full border border-neutral-200 rounded bg-white"
+        height={60}
+        className="w-full block"
+        style={{
+          backgroundColor: 'var(--color-surface-sunken)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-sm)',
+        }}
       />
 
       {!isRecording && (
-        <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 mt-2">
+        <div
+          className="flex items-center justify-center gap-1.5 mt-2 text-xs"
+          style={{ color: 'var(--color-text-muted)' }}
+        >
           <Mic className="w-3 h-3" />
           <span>Click record to see waveform</span>
         </div>

@@ -21,6 +21,10 @@ class Settings:
     OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", 0.7))
     # Low temperature for deterministic ISO formalization output
     OLLAMA_FORMALIZE_TEMPERATURE = float(os.getenv("OLLAMA_FORMALIZE_TEMPERATURE", 0.1))
+    # Smaller/faster model for quality analysis (smell + gap scoring).
+    # Set to e.g. "phi3:mini" or "gemma2:2b" to cut analysis latency.
+    # Defaults to the main model so it works out of the box.
+    OLLAMA_ANALYSIS_MODEL = os.getenv("OLLAMA_ANALYSIS_MODEL", "")
     
     # Faster-Whisper Configuration
     WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")  # tiny, base, small, medium, large
@@ -36,7 +40,7 @@ class Settings:
     # File Upload Configuration
     MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
     UPLOAD_DIR = os.getenv("UPLOAD_DIR", "data/uploads")
-    SUPPORTED_FILE_TYPES = ["pdf", "txt", "docx", "wav", "mp3"]
+    SUPPORTED_FILE_TYPES = ["pdf", "txt", "doc", "docx", "wav", "mp3", "m4a", "ogg", "flac", "webm"]
     
     # PDF Processing
     PDF_EXTRACTION_MODEL = "pymupdf"  # PyMuPDF for fast extraction
@@ -53,14 +57,14 @@ class Settings:
     ISO_29148_TEMPLATE_VERSION = "2023"
     
     # Jira Configuration
-    JIRA_ENABLED = os.getenv("JIRA_ENABLED", "False") == "True"
+    JIRA_ENABLED = os.getenv("JIRA_ENABLED", "True") == "True"
     JIRA_SERVER_URL = os.getenv("JIRA_SERVER_URL", "")
     JIRA_USERNAME = os.getenv("JIRA_USERNAME", "")
     JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
     JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "")
     
     # Trello Configuration
-    TRELLO_ENABLED = os.getenv("TRELLO_ENABLED", "False") == "True"
+    TRELLO_ENABLED = os.getenv("TRELLO_ENABLED", "True") == "True"
     TRELLO_API_KEY = os.getenv("TRELLO_API_KEY", "")
     TRELLO_API_TOKEN = os.getenv("TRELLO_API_TOKEN", "")
     TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID", "")

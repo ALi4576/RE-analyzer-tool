@@ -227,9 +227,13 @@ Resume Workflow from Last State
 - ✅ WebSocket handler importable
 
 ### Frontend Status
-- ✅ Build successful
-- ✅ Running on http://localhost:3001
+- ✅ Build successful (zero TypeScript errors)
+- ✅ Running on http://localhost:3000
 - ✅ Real-time analysis triggers every 50 chars
+- ✅ Light/dark theme with system preference detection (ThemeContext)
+- ✅ Redesigned Dashboard — sticky glassmorphism header, 2-column grid layout
+- ✅ Clarification panel renders as animated modal with backdrop blur
+- ✅ Full design token system (CSS custom properties for light + dark)
 
 ### Next Tests Needed
 - ⏳ Integration test: Send text through to backend
@@ -273,11 +277,11 @@ python main.py
 ```bash
 cd F:\coding\RE_tool\Web_Frontend
 npm run dev
-# Runs on http://localhost:3001
+# Runs on http://localhost:3000
 ```
 
 ### Access
-- **Frontend**: http://localhost:3001
+- **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:8000/api
 - **API Docs**: http://localhost:8000/docs
 

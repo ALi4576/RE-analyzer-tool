@@ -76,6 +76,20 @@ class FormalizeRequest(BaseModel):
     session_id: str = Field(..., description="Session ID")
 
 
+class PatchRequirementRequest(BaseModel):
+    """Partial update to a single requirement. Any subset of fields may be sent."""
+    title: Optional[str] = None
+    shall_statement: Optional[str] = None
+    rationale: Optional[str] = None
+    acceptance_criteria: Optional[List[str]] = None
+    priority: Optional[str] = None
+
+
+class ClarifyRequirementRequest(BaseModel):
+    """User-supplied context used to refine a specific requirement via the LLM."""
+    additional_context: str = Field(..., description="Free-form context for LLM-driven refinement")
+
+
 # ============ Response Models ============
 
 class RequirementSmellAnalysis(BaseModel):
@@ -112,6 +126,18 @@ class ISORequirement(BaseModel):
     priority: str = Field(..., description="High/Medium/Low")
     category: Optional[str] = Field(None, description="Functional/Non-functional/Interface")
     traceability: Optional[List[str]] = Field(None, description="Linked requirement IDs")
+    completeness_score: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        description="Per-requirement completeness ratio across the 6 ISO fields (0.0-1.0)",
+    )
+    quality_score: float = Field(
+        default=1.0,
+        ge=0,
+        le=1,
+        description="Per-requirement smell quality score (1.0 = no smells, 0.0 = worst)",
+    )
 
 
 class AnalysisResponse(BaseModel):
@@ -133,6 +159,12 @@ class FormalizedRequirement(BaseModel):
     summary: str = Field(..., description="Executive summary")
     total_requirements: int = Field(..., description="Total number of requirements")
     completeness_score: float = Field(..., ge=0, le=1)
+    quality_score: float = Field(
+        default=1.0,
+        ge=0,
+        le=1,
+        description="Document-level average of per-requirement smell quality scores",
+    )
     ready_for_export: bool = Field(...)
     export_formats: List[str] = Field(..., description="Available export formats")
 

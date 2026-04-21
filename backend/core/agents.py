@@ -56,21 +56,31 @@ class RequirementsAnalysisAgent:
     
     def __init__(self):
         """Initialize agent squad with LangGraph."""
-        # Initialize LLM for analysis nodes (smell, logic, parse)
+        # Fast model for quality analysis (smell detection + gap scoring).
+        # Defaults to the main model; set OLLAMA_ANALYSIS_MODEL=phi3:mini etc. for speed.
+        analysis_model = settings.OLLAMA_ANALYSIS_MODEL or settings.OLLAMA_MODEL
+        self.analysis_llm = OllamaLLM(
+            base_url=settings.OLLAMA_BASE_URL,
+            model=analysis_model,
+            temperature=0.1,
+            format="json",
+            num_predict=512,   # smell+gap JSON is small; cap prevents runaway generation
+        )
+        # Main LLM for question generation
         self.llm = OllamaLLM(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.OLLAMA_MODEL,
             temperature=settings.OLLAMA_TEMPERATURE,
             format="json",
-            request_timeout=25,  # prevent hung requests from blocking a GPU slot indefinitely
+            num_predict=512,
         )
-        # Low-temperature LLM for deterministic ISO 29148 formalization
+        # Low-temperature LLM for ISO 29148 formalization
         self.formalize_llm = OllamaLLM(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.OLLAMA_MODEL,
             temperature=settings.OLLAMA_FORMALIZE_TEMPERATURE,
             format="json",
-            request_timeout=25,
+            num_predict=2048,  # formalization can produce many requirements
         )
         
         # Initialize state persister
@@ -83,42 +93,36 @@ class RequirementsAnalysisAgent:
         logger.info("RequirementsAnalysisAgent initialized")
     
     def _build_workflow(self):
-        """Build LangGraph workflow for requirements analysis."""
+        """Build LangGraph workflow for requirements analysis.
+
+        Pipeline (2 LLM calls instead of the original 4):
+          analyze_quality  — smell detection + gap scoring in one fast call
+          formalize        — ISO 29148 formatting with the full-capability model
+          consolidate      — decide whether to interrupt
+          generate_questions | export_ready
+        """
         workflow = StateGraph(AgentState)
-        
-        # Define nodes
-        workflow.add_node("parse_input", self._parse_input_node)
-        workflow.add_node("detect_smells", self._detect_smells_node)
-        workflow.add_node("analyze_logic", self._analyze_logic_node)
+
+        workflow.add_node("analyze_quality", self._analyze_quality_node)
         workflow.add_node("formalize", self._formalize_node)
         workflow.add_node("consolidate", self._consolidate_results_node)
         workflow.add_node("generate_questions", self._generate_questions_node)
         workflow.add_node("export_ready", self._export_ready_node)
-        
-        # SCRIBE MODE: Sequential processing to avoid concurrent writes
-        # Parse -> detect_smells and analyze_logic and formalize can run in sequence
-        # but we use consolidate to merge their outputs before interrupt decision
-        workflow.add_edge("parse_input", "detect_smells")
-        workflow.add_edge("detect_smells", "analyze_logic")
-        workflow.add_edge("analyze_logic", "formalize")
+
+        workflow.add_edge("analyze_quality", "formalize")
         workflow.add_edge("formalize", "consolidate")
-        
-        # Consolidate decides whether to interrupt based on smell score
+
         workflow.add_conditional_edges(
             "consolidate",
             self._should_interrupt,
-            {
-                True: "generate_questions",
-                False: "export_ready",
-            },
+            {True: "generate_questions", False: "export_ready"},
         )
-        
-        workflow.add_edge("generate_questions", END)  # Wait for user input
+
+        workflow.add_edge("generate_questions", END)
         workflow.add_edge("export_ready", END)
-        
-        # Set entry point
-        workflow.set_entry_point("parse_input")
-        
+
+        workflow.set_entry_point("analyze_quality")
+
         return workflow
     
     async def analyze(self, state: RequirementAnalysisState) -> Dict[str, Any]:
@@ -134,13 +138,18 @@ class RequirementsAnalysisAgent:
         logger.info(f"Starting analysis for session {state.session_id}")
 
         try:
-            # Convert Pydantic model to dict for LangGraph
+            # Convert Pydantic model to dict for LangGraph.
+            # Explicitly reset clarification fields so a fresh analysis on the same
+            # session_id doesn't inherit answered questions from a previous checkpoint
+            # and incorrectly suppress the interrupt via _should_interrupt.
             state_dict: AgentState = {
                 "session_id": state.session_id,
                 "input_text": state.input_text,
                 "context_docs": [doc.model_dump() if hasattr(doc, 'model_dump') else doc for doc in (state.context_docs or [])],
                 "status": state.status.value if hasattr(state.status, 'value') else str(state.status),
                 "interrupt_needed": False,
+                "user_clarifications": {},
+                "clarification_questions": [],
             }
 
             # Run the workflow in a thread so the async event loop stays unblocked
@@ -216,6 +225,13 @@ class RequirementsAnalysisAgent:
             existing_clarifications = existing.values.get("user_clarifications") or {}
             merged_clarifications = {**existing_clarifications, **clarifications}
 
+            # Carry over the clarification_questions from the interrupted run so the
+            # formalizer can pair each question_id with its user answer. Without this,
+            # if the resumed pipeline re-enters _generate_questions_node and regenerates
+            # questions with fresh IDs, the user's answers (keyed by the OLD IDs) would
+            # be silently dropped.
+            prior_questions = existing.values.get("clarification_questions") or []
+
             state_dict: AgentState = {
                 "session_id": session_id,
                 "input_text": existing.values.get("input_text", ""),
@@ -223,6 +239,7 @@ class RequirementsAnalysisAgent:
                 "status": "clarified",
                 "interrupt_needed": False,
                 "user_clarifications": merged_clarifications,
+                "clarification_questions": prior_questions,
             }
 
             # Re-run pipeline in a thread (now formalizer will see user_clarifications)
@@ -300,6 +317,96 @@ Respond with structured analysis.
         
         return state
     
+    def _analyze_quality_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Combined smell detection + logical gap scoring in a single LLM call.
+
+        Replaces the old parse_input → detect_smells → analyze_logic chain (3 calls)
+        with one call to analysis_llm (optionally a smaller/faster model).
+        Sets: smells, smell_score, logical_gap_score, status, parsed_analysis.
+        """
+        import json as _json
+
+        logger.info("Executing: Quality Analysis Node (smell + gap)")
+
+        state = self._ensure_dict(state)
+        input_text = state.get("input_text", "")
+
+        if "requirements" not in state:
+            state["requirements"] = []
+
+        quality_prompt = f"""You are a requirements quality analyst. Analyze this requirement text.
+
+Text:
+{input_text}
+
+Return ONLY this JSON (no markdown, no explanation):
+{{
+  "smells": [
+    {{
+      "type": "ambiguous",
+      "severity": 0.85,
+      "location": "exact quoted phrase from the text",
+      "recommendation": "specific actionable fix"
+    }}
+  ],
+  "gap_score": 0.75
+}}
+
+Smell types:
+- ambiguous: vague words (fast, secure, easy, flexible, better, modern, good, clean, intuitive)
+- incomplete: missing who/what/when/how much
+- unmeasurable: no concrete metric or threshold
+- infeasible: cannot be implemented or verified as stated
+- conflicting: contradicts another statement in the same text
+- scope_creep: multiple unrelated concerns bundled together
+
+severity: 0.0 = minor, 1.0 = critical
+gap_score: 0.0 = fully specified and implementable, 1.0 = completely vague
+smells: use [] if the text is clear, specific, and well-specified"""
+
+        response = self.analysis_llm.invoke(quality_prompt)
+        logger.info(f"Quality analysis raw response: {str(response)[:200]}")
+
+        smells: List[RequirementSmellAnalysis] = []
+        gap_score = 0.5
+
+        try:
+            parsed = _json.loads(response) if isinstance(response, str) else response
+            raw_smells = parsed.get("smells", [])
+            gap_score = float(parsed.get("gap_score", 0.5))
+
+            for s in raw_smells:
+                smells.append(RequirementSmellAnalysis(
+                    smell_type=self._map_smell_type(s.get("type", "ambiguous")),
+                    severity=float(s.get("severity", 0.5)),
+                    location=s.get("location", input_text[:80]),
+                    recommendation=s.get("recommendation", "Clarify this requirement"),
+                ))
+        except Exception as e:
+            logger.warning(f"Quality analysis parse error: {e} — applying fallback smell")
+            smells.append(RequirementSmellAnalysis(
+                smell_type=RequirementSmell.AMBIGUOUS,
+                severity=0.8,
+                location=input_text[:80],
+                recommendation="Requirement needs clarification with specific, measurable criteria",
+            ))
+            gap_score = 0.7
+
+        smell_score = min(1.0, sum(s.severity for s in smells))
+
+        logger.info(
+            f"Quality analysis complete. smell_score={smell_score:.2f} "
+            f"({len(smells)} smells), gap_score={gap_score:.2f}"
+        )
+
+        state["smells"] = [s.model_dump() for s in smells]
+        state["smell_score"] = smell_score
+        state["logical_gap_score"] = gap_score
+        state["parsed_analysis"] = f"smell_score={smell_score:.2f}, gap_score={gap_score:.2f}"
+        state["status"] = "analyzing"
+
+        return state
+
     def _detect_smells_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Detect requirement smells.
@@ -316,35 +423,38 @@ Respond with structured analysis.
         if "requirements" not in state:
             state["requirements"] = []
         
-        smell_prompt = f"""
-Analyze this requirement text for common requirement smells:
-- Ambiguous language (vague, imprecise)
-- Incomplete specifications (missing details)
-- Infeasible requirements (impossible to implement)
-- Conflicting statements
-- Unmeasurable criteria (no metrics)
-- Scope creep indicators
-- Missing business rationale
+        smell_prompt = f"""You are a requirements quality analyst. Detect requirement smells in the text below.
 
-Input: {input_text}
+Smell types to check:
+- ambiguous: vague words like "fast", "secure", "easy", "flexible", "better", "good", "modern"
+- incomplete: missing who/what/when/how much
+- unmeasurable: no concrete metric or acceptance threshold
+- infeasible: impossible to verify or implement
+- conflicting: contradicts another statement
+- scope_creep: multiple unrelated concerns in one requirement
 
-For each smell found, rate severity 0-1 and suggest fix.
-Format as JSON with fields: [{{\"type\": \"...\", \"severity\": 0.8, \"location\": \"...\", \"recommendation\": \"...\"}}]
-"""
-        
+Input text:
+{input_text}
+
+RULES:
+- Return ONLY a raw JSON array. No markdown. No explanation. No code fences.
+- Each item: {{"type": "ambiguous", "severity": 0.85, "location": "exact quoted phrase", "recommendation": "specific fix"}}
+- severity: 0.0-1.0 where 1.0 is worst
+- If no smells found, return: []
+
+JSON array:"""
+
         smells_response = self.llm.invoke(smell_prompt)
-        
+
         if not smells_response:
             logger.error("Ollama returned empty response for smells")
-    
+
         # Parse LLM response to extract smells
         smells = self._parse_smell_response(smells_response, input_text)
-        
-        if not smells_response:
-            logger.error("Ollama returned empty response for smells")
-        
-        # Calculate overall smell score
-        smell_score = sum(s.severity for s in smells) / len(smells) if smells else 0.0
+
+        # Accumulative score: each smell adds its severity so more problems = higher score.
+        # Capped at 1.0. This replaces the old average which diluted multiple smells.
+        smell_score = min(1.0, sum(s.severity for s in smells))
         
         logger.info(f"Smell detection complete. Score: {smell_score:.2f}, Smells found: {len(smells)}")
         
@@ -358,6 +468,10 @@ Format as JSON with fields: [{{\"type\": \"...\", \"severity\": 0.8, \"location\
         Determine if workflow should interrupt for human clarification.
 
         Triggers when smell score OR logical gap score exceeds its threshold.
+        Skips the interrupt entirely on resume runs where the user has already
+        answered the clarification questions from the prior interrupted pass —
+        otherwise the pipeline would loop, re-asking the user the same questions
+        every time smell/gap stays above threshold.
         """
         smell_score = state.get("smell_score", 0.0)
         logical_gap_score = state.get("logical_gap_score", 0.0)
@@ -365,6 +479,22 @@ Format as JSON with fields: [{{\"type\": \"...\", \"severity\": 0.8, \"location\
         smell_trigger = smell_score >= settings.SMELL_SCORE_THRESHOLD
         gap_trigger = logical_gap_score >= settings.LOGICAL_GAP_THRESHOLD
         should_interrupt = smell_trigger or gap_trigger
+
+        # Break the re-interrupt loop: if the user has already answered the prior
+        # clarification questions, do not interrupt again for this pass.
+        user_clarifications = state.get("user_clarifications") or {}
+        prior_questions = state.get("clarification_questions") or []
+        if should_interrupt and user_clarifications and prior_questions:
+            prior_ids = {
+                q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
+                for q in prior_questions
+            }
+            answered_ids = {qid for qid, ans in user_clarifications.items() if ans}
+            if prior_ids and prior_ids.issubset(answered_ids):
+                logger.info(
+                    "Suppressing interrupt: all prior clarification questions have been answered."
+                )
+                should_interrupt = False
 
         logger.info(
             f"Interrupt check: smell={smell_score:.2f}(>={settings.SMELL_SCORE_THRESHOLD}={smell_trigger}), "
@@ -387,20 +517,26 @@ Format as JSON with fields: [{{\"type\": \"...\", \"severity\": 0.8, \"location\
         if "requirements" not in state:
             state["requirements"] = []
         
-        logic_prompt = f"""
-Analyze the logical structure of these requirements:
+        logic_prompt = f"""You are a requirements analyst. Assess the logical completeness of this requirement text.
 
+Text:
 {input_text}
 
-Identify:
-1. Logical gaps (missing components)
-2. Contradictions
-3. Unclear dependencies
-4. Missing acceptance criteria
+Check for:
+1. Missing actor or system subject
+2. Missing measurable success criteria
+3. Undefined terms or jargon
+4. Dependencies on unstated assumptions
+5. Contradictions between statements
 
-Rate overall logical consistency 0-1.
-"""
-        
+Rate the gap_score from 0.0 to 1.0 where:
+- 1.0 = extremely vague, missing most details, cannot be implemented as-is
+- 0.5 = partially specified, some gaps
+- 0.0 = fully specified, no gaps
+
+Respond with exactly this line and nothing else:
+gap_score: X.XX"""
+
         logic_analysis = self.llm.invoke(logic_prompt)
         logical_gap_score = self._extract_score(logic_analysis)
         
@@ -412,14 +548,40 @@ Rate overall logical consistency 0-1.
         return state
     
     def _generate_questions_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate clarification questions for interruption."""
+        """Generate clarification questions for interruption.
+
+        If user_clarifications already exist for all previously-generated questions
+        (i.e. we are on a resume run after the user answered), preserve the existing
+        questions so _formalize_node's question_id → answer lookup keeps working.
+        Otherwise, generate fresh questions from the LLM. Also sets status to
+        'needs_clarification' so downstream consumers can distinguish an interrupted
+        session from a completed formal draft.
+        """
         logger.info("Executing: Question Generation Node")
-        
+
         state = self._ensure_dict(state)
         input_text = state.get("input_text", "")
         smells = state.get("smells", [])
-        
-        questions_prompt = f"""
+        existing_questions = state.get("clarification_questions") or []
+        user_clarifications = state.get("user_clarifications") or {}
+
+        # If we already have questions AND the user has answered at least one of them,
+        # keep the existing questions so the formalizer can still match IDs → answers.
+        # Regenerating would produce new question_ids that don't match user_clarifications,
+        # silently dropping the user's answers on resume.
+        answered_ids = {qid for qid, ans in user_clarifications.items() if ans}
+        existing_ids = {
+            q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
+            for q in existing_questions
+        }
+        if existing_questions and answered_ids & existing_ids:
+            logger.info(
+                f"Preserving {len(existing_questions)} existing clarification questions "
+                f"(user has answered {len(answered_ids & existing_ids)} of them)"
+            )
+            questions = existing_questions
+        else:
+            questions_prompt = f"""
 Based on these requirement quality issues, generate focused clarification questions:
 
 Issues found:
@@ -430,14 +592,40 @@ Input: {input_text}
 Generate 2-3 specific questions to clarify ambiguities.
 Format as JSON: [{{\"question_id\": \"q1\", \"question\": \"...\", \"context\": \"...\", \"required_clarity\": [\"...\"]}}]
 """
-        
-        questions_response = self.llm.invoke(questions_prompt)
-        questions = self._parse_questions_response(questions_response)
-        
+
+            questions_response = self.llm.invoke(questions_prompt)
+            questions = self._parse_questions_response(questions_response)
+
+            # Fallback: if the LLM produced no parseable questions but we still need an
+            # interrupt, emit a generic question so the interrupt is actionable and the
+            # frontend doesn't hang waiting for questions that never arrive.
+            if not questions:
+                logger.warning(
+                    "Question generation returned empty list; emitting fallback question "
+                    "so the interrupt carries an actionable payload."
+                )
+                questions = [
+                    ClarificationQuestion(
+                        question_id="q_fallback_1",
+                        question=(
+                            "The requirement contains quality issues (ambiguity, "
+                            "missing details, or unclear scope). Please provide "
+                            "additional context or specifics to help formalize it."
+                        ),
+                        context="Auto-generated fallback — LLM did not return structured questions.",
+                        required_clarity=["scope", "measurable criteria", "rationale"],
+                    )
+                ]
+
         logger.info(f"Generated {len(questions)} clarification questions")
-        
-        state["clarification_questions"] = questions
-        
+
+        state["clarification_questions"] = [
+            q.model_dump() if hasattr(q, "model_dump") else q for q in questions
+        ]
+        # Signal to downstream consumers (frontend, /formalize endpoint, WS handler)
+        # that this session is interrupted awaiting clarification — NOT a completed draft.
+        state["status"] = "needs_clarification"
+
         return state
     
     def _formalize_node(self, state: AgentState) -> AgentState:
@@ -457,11 +645,15 @@ Format as JSON: [{{\"question_id\": \"q1\", \"question\": \"...\", \"context\": 
         if context_docs:
             context_text = " ".join([str(doc.get("extracted_text", "")[:500]) for doc in context_docs])
         
-        # Build clarifications
+        # Build clarifications — questions may be dicts or Pydantic objects (from checkpoint)
+        def _qfield(q, field, default=""):
+            return q.get(field, default) if isinstance(q, dict) else getattr(q, field, default)
+
         clarifications_text = ""
         if clarification_questions:
+            user_clarifs = state.get("user_clarifications") or {}
             clarifications_text = "\n".join([
-                f"Q: {q.get('question', '')}\nA: {state.get('user_clarifications', {}).get(q.get('question_id', ''), '')}"
+                f"Q: {_qfield(q, 'question')}\nA: {user_clarifs.get(_qfield(q, 'question_id', ''), '')}"
                 for q in clarification_questions
             ])
         
@@ -546,9 +738,18 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
             state["requirements"] = valid_requirements
             state["status"] = "formal_draft"
             state["interrupt_needed"] = interrupt_needed
+            completeness_score = self._calculate_requirements_completeness(valid_requirements)
+            # Attach per-requirement smell-based quality score (and compute the
+            # document-level average). Smells are already populated by the
+            # prior analyze_quality node. This is pure text-matching — no
+            # extra LLM calls — so it is safe to run inline here.
+            quality_score = self._attach_per_requirement_quality(
+                valid_requirements, state.get("smells", []) or []
+            )
             state["formalized"] = {
                 "total_requirements": len(valid_requirements),
-                "completeness_score": self._calculate_requirements_completeness(valid_requirements),
+                "completeness_score": completeness_score,
+                "quality_score": quality_score,
                 # Only export-ready when there are requirements AND no pending interrupt
                 "ready_for_export": bool(valid_requirements) and not interrupt_needed,
             }
@@ -591,14 +792,12 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
             state["smells"] = []
 
         # Keep interrupt_needed in sync with _should_interrupt's logic so callers
-        # reading state (API endpoints, WebSocket) see the correct value.
+        # reading state (API endpoints, WebSocket) see the correct value — including
+        # the "all prior questions already answered" loop-breaker below.
+        interrupt_needed = self._should_interrupt(state)
+        state["interrupt_needed"] = interrupt_needed
         smell_score = state.get("smell_score", 0.0)
         logical_gap_score = state.get("logical_gap_score", 0.0)
-        interrupt_needed = (
-            smell_score >= settings.SMELL_SCORE_THRESHOLD
-            or logical_gap_score >= settings.LOGICAL_GAP_THRESHOLD
-        )
-        state["interrupt_needed"] = interrupt_needed
 
         # Also keep ready_for_export consistent with updated interrupt flag
         if "formalized" in state and isinstance(state["formalized"], dict):
@@ -665,14 +864,24 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                         recommendation=smell_data.get("recommendation", "Clarify requirement"),
                     )
                     smells.append(smell)
+            else:
+                # LLM returned prose instead of JSON — treat the whole response as
+                # evidence that smells exist (it wouldn't write paragraphs for clean input).
+                logger.warning("Smell response contained no JSON array — adding prose fallback smell")
+                smells.append(RequirementSmellAnalysis(
+                    smell_type=RequirementSmell.AMBIGUOUS,
+                    severity=0.8,
+                    location=original_text[:80],
+                    recommendation="Requirement needs clarification — specify measurable criteria",
+                ))
 
         except Exception as e:
             logger.warning(f"Error parsing smell response: {str(e)}")
             smells.append(RequirementSmellAnalysis(
                 smell_type=RequirementSmell.AMBIGUOUS,
-                severity=0.5,
+                severity=0.8,
                 location=original_text[:50],
-                recommendation="Please clarify the requirement",
+                recommendation="Please clarify the requirement with specific, measurable criteria",
             ))
 
         return smells
@@ -806,13 +1015,18 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
         """
         Calculate completeness score for formalized requirements.
         Based on presence of all ISO 29148 required fields.
+
+        Side-effect: attaches a per-requirement ``completeness_score`` (float in
+        [0.0, 1.0]) to each dict in ``requirements`` so the frontend can display
+        a distinct score per card. The return value remains the document-level
+        average for backward compatibility with existing callers.
         """
         if not requirements:
             return 0.0
-        
+
         total_score = 0.0
         required_fields = ["title", "shall_statement", "rationale", "acceptance_criteria", "priority", "category"]
-        
+
         for req in requirements:
             score = 0.0
             for field in required_fields:
@@ -823,11 +1037,100 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                             score += 1.0 / len(required_fields)
                     else:
                         score += 1.0 / len(required_fields)
+            # Attach the per-requirement score to the dict so it survives
+            # through the WebSocket payload to the frontend.
+            req["completeness_score"] = score
             total_score += score
-        
+
         completeness = total_score / len(requirements) if requirements else 0.0
         logger.info(f"Requirements completeness: {completeness:.1%}")
         return completeness
+
+    def _attach_per_requirement_quality(
+        self,
+        requirements: List[Dict[str, Any]],
+        smells: List[Any],
+    ) -> float:
+        """
+        Attach a per-requirement ``quality_score`` derived from smell severity.
+
+        Smells are produced against the raw input text and carry a ``location``
+        (quoted phrase). Formalization rewrites wording (e.g. "must" → "shall"),
+        so exact substring matching fails. Instead we use word-overlap: if ≥40%
+        of a smell's meaningful tokens appear in a requirement's title+shall_statement,
+        that smell is attributed to that requirement. Stopwords and modal verbs
+        (must/shall/should) are excluded from tokens so rewriting doesn't break matching.
+
+        The return value is the average quality score across all requirements
+        — this is the new document-level cumulative shown in the feed footer.
+
+        Notes:
+        - ``smells`` may contain either ``RequirementSmellAnalysis`` model
+          instances or dicts (``state["smells"]`` stores dumped dicts at
+          line 402). Both shapes are handled.
+        - Pure text matching — NO additional LLM calls.
+        """
+        if not requirements:
+            return 0.0
+
+        import re as _re
+
+        def _tokens(text: str) -> set:
+            """Meaningful word tokens — strip stopwords that differ between raw/formalized text."""
+            stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
+                         "being", "have", "has", "had", "do", "does", "did", "will",
+                         "would", "could", "should", "may", "might", "must", "shall",
+                         "system", "to", "of", "in", "for", "on", "with", "at", "by",
+                         "from", "up", "about", "into", "through", "during", "it",
+                         "its", "that", "this", "and", "or", "but", "not", "no"}
+            return {w for w in _re.findall(r"[a-z0-9]+", text.lower()) if w not in stopwords and len(w) > 2}
+
+        # Normalize smell entries to a uniform (location_tokens, severity) shape.
+        normalized_smells: List[Dict[str, Any]] = []
+        for s in smells or []:
+            if isinstance(s, dict):
+                loc = s.get("location") or ""
+                sev = float(s.get("severity", 0.0) or 0.0)
+            else:
+                loc = getattr(s, "location", "") or ""
+                sev = float(getattr(s, "severity", 0.0) or 0.0)
+            if not loc:
+                continue
+            normalized_smells.append({"tokens": _tokens(loc), "severity": sev})
+
+        OVERLAP_THRESHOLD = 0.4  # fraction of smell tokens that must appear in req text
+
+        total_quality = 0.0
+        for req in requirements:
+            shall = (req.get("shall_statement") or "").lower()
+            title = (req.get("title") or "").lower()
+            req_tokens = _tokens(f"{title} {shall}")
+
+            matched_severity_sum = 0.0
+            for ns in normalized_smells:
+                smell_tokens = ns["tokens"]
+                if not smell_tokens:
+                    continue
+                overlap = len(smell_tokens & req_tokens) / len(smell_tokens)
+                if overlap >= OVERLAP_THRESHOLD:
+                    matched_severity_sum += ns["severity"]
+
+            per_req_smell_score = min(1.0, matched_severity_sum)
+            quality_score = round(1.0 - per_req_smell_score, 4)
+            # Clamp defensively — round of a negative could still slip in edge cases
+            if quality_score < 0.0:
+                quality_score = 0.0
+            elif quality_score > 1.0:
+                quality_score = 1.0
+            req["quality_score"] = quality_score
+            total_quality += quality_score
+
+        average_quality = total_quality / len(requirements)
+        logger.info(
+            f"Per-requirement quality attached. avg_quality={average_quality:.3f} "
+            f"across {len(requirements)} reqs (matched against {len(normalized_smells)} smells)"
+        )
+        return average_quality
 
 
 # Global agent instance

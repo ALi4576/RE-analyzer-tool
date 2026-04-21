@@ -51,8 +51,9 @@ class FileUploadService:
             session_dir = self.upload_dir / session_id
             session_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save file
-            file_path = session_dir / file.filename
+            # Save file — strip directory components to prevent path traversal
+            safe_name = Path(file.filename).name
+            file_path = session_dir / safe_name
             
             with open(file_path, "wb") as f:
                 content = await file.read()

@@ -14,10 +14,12 @@ interface DocumentUploadProps {
   isLoading?: boolean;
 }
 
-export const DocumentUpload: React.FC<DocumentUploadProps> = ({ }) => {
+export const DocumentUpload: React.FC<DocumentUploadProps> = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>(
+    'idle'
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const { uploadDocument, addNotification } = useRequirementStore();
@@ -48,9 +50,9 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({ }) => {
       await uploadDocument(file);
       setUploadStatus('done');
       addNotification({ type: 'success', message: `${file.name} uploaded successfully` });
-    } catch (e: any) {
+    } catch (e: unknown) {
       setUploadStatus('error');
-      const msg = e?.message || 'Upload failed';
+      const msg = e instanceof Error ? e.message : 'Upload failed';
       setErrorMsg(msg);
       addNotification({ type: 'error', message: msg });
     }
@@ -76,31 +78,34 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({ }) => {
   };
 
   return (
-    <div className="card p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="font-semibold text-neutral-900">Document Upload</h3>
-          <p className="text-sm text-neutral-500">Upload PDF, TXT, DOC, or DOCX as context</p>
-        </div>
-        {uploadStatus === 'done' && (
-          <CheckCircle className="w-5 h-5 text-green-500" />
-        )}
-      </div>
-
-      {/* Drop Zone */}
+    <div className="space-y-3">
       {uploadStatus !== 'done' && (
         <div
-          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
           onDragLeave={() => setIsDragging(false)}
           onDrop={handleDrop}
           onClick={() => inputRef.current?.click()}
-          className={`
-            relative border-2 border-dashed rounded-lg p-6 flex flex-col items-center gap-3
-            cursor-pointer transition-colors select-none
-            ${isDragging
-              ? 'border-blue-400 bg-blue-50'
-              : 'border-neutral-300 bg-neutral-50 hover:border-neutral-400 hover:bg-neutral-100'}
-          `}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              inputRef.current?.click();
+            }
+          }}
+          className="relative p-5 flex flex-col items-center gap-2 cursor-pointer select-none transition-colors"
+          style={{
+            backgroundColor: isDragging
+              ? 'var(--color-primary-subtle)'
+              : 'var(--color-surface)',
+            border: `1px dashed ${
+              isDragging ? 'var(--color-primary)' : 'var(--color-border-strong)'
+            }`,
+            borderRadius: 'var(--radius-md)',
+          }}
         >
           <input
             ref={inputRef}
@@ -112,48 +117,110 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({ }) => {
 
           {uploadStatus === 'uploading' ? (
             <>
-              <Loader className="w-8 h-8 text-blue-500 animate-spin" />
-              <p className="text-sm text-neutral-600">Uploading {uploadedFile?.name}…</p>
+              <Loader
+                className="w-6 h-6 animate-spin"
+                style={{ color: 'var(--color-primary)' }}
+              />
+              <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                Uploading {uploadedFile?.name}…
+              </p>
             </>
           ) : (
             <>
-              <Upload className="w-8 h-8 text-neutral-400" />
+              <Upload
+                className="w-6 h-6"
+                style={{ color: 'var(--color-text-muted)' }}
+              />
               <div className="text-center">
-                <p className="text-sm font-medium text-neutral-700">
-                  Drop a file here or <span className="text-blue-600 underline">browse</span>
+                <p
+                  className="text-sm font-medium"
+                  style={{ color: 'var(--color-text-primary)' }}
+                >
+                  Drop a file here or{' '}
+                  <span
+                    className="underline"
+                    style={{ color: 'var(--color-primary-text)' }}
+                  >
+                    browse
+                  </span>
                 </p>
-                <p className="text-xs text-neutral-500 mt-1">PDF · TXT · DOC · DOCX — up to 20 MB</p>
+                <p
+                  className="text-xs mt-1"
+                  style={{ color: 'var(--color-text-muted)' }}
+                >
+                  PDF, TXT, DOC, DOCX — up to 20 MB
+                </p>
               </div>
             </>
           )}
         </div>
       )}
 
-      {/* Uploaded file pill */}
       {uploadedFile && uploadStatus === 'done' && (
-        <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
-          <FileText className="w-5 h-5 text-green-600 shrink-0" />
+        <div
+          className="flex items-center gap-3 px-3 py-2.5"
+          style={{
+            backgroundColor: 'var(--color-success-subtle)',
+            border: '1px solid var(--color-success-subtle-border)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
+          <CheckCircle
+            className="w-4 h-4 flex-shrink-0"
+            style={{ color: 'var(--color-success)' }}
+          />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-green-900 truncate">{uploadedFile.name}</p>
-            <p className="text-xs text-green-700">
-              {ACCEPTED_TYPES[uploadedFile.type] ?? 'Document'} · {(uploadedFile.size / 1024).toFixed(0)} KB · Ready as context
+            <p
+              className="text-sm font-medium truncate"
+              style={{ color: 'var(--color-success-text)' }}
+            >
+              {uploadedFile.name}
+            </p>
+            <p
+              className="text-xs"
+              style={{ color: 'var(--color-success-text)', opacity: 0.85 }}
+            >
+              {ACCEPTED_TYPES[uploadedFile.type] ?? 'Document'} ·{' '}
+              {(uploadedFile.size / 1024).toFixed(0)} KB · Ready as context
             </p>
           </div>
           <button
+            type="button"
             onClick={reset}
-            className="shrink-0 text-green-600 hover:text-green-800 transition-colors"
-            title="Remove"
+            className="flex-shrink-0"
+            style={{ color: 'var(--color-success-text)' }}
+            aria-label="Remove file"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Error */}
       {errorMsg && uploadStatus === 'error' && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
-          <p className="text-sm text-red-700 flex-1">{errorMsg}</p>
-          <button onClick={reset} className="text-red-500 hover:text-red-700 shrink-0">
+        <div
+          className="flex items-start gap-2 px-3 py-2.5"
+          style={{
+            backgroundColor: 'var(--color-danger-subtle)',
+            border: '1px solid var(--color-danger-subtle-border)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
+          <FileText
+            className="w-4 h-4 mt-0.5 flex-shrink-0"
+            style={{ color: 'var(--color-danger)' }}
+          />
+          <p
+            className="text-sm flex-1"
+            style={{ color: 'var(--color-danger-text)' }}
+          >
+            {errorMsg}
+          </p>
+          <button
+            type="button"
+            onClick={reset}
+            style={{ color: 'var(--color-danger-text)' }}
+            aria-label="Dismiss error"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>

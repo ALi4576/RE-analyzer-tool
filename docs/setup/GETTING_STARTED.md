@@ -28,8 +28,11 @@ venv\Scripts\activate
 # Install dependencies (first time ~5 minutes)
 pip install -r requirements.txt
 
-# Copy environment config
-copy .env.example .env
+# Copy environment config (skip if backend/.env already exists)
+copy .env.example backend\.env
+
+# (Optional) Pull faster analysis model for lower latency
+ollama pull phi3:mini
 
 # Run setup script (optional, helps with initial checks)
 python setup.py
@@ -223,8 +226,10 @@ async def stream_audio():
         print("Connected:", json.loads(msg))
         
         # Read audio file and stream chunks
-        audio_data = Path("speech.wav").read_bytes()
-        chunk_size = 3200  # ~200ms at 16kHz
+        # NOTE: backend expects webm container format (as produced by browser
+        # MediaRecorder). Raw PCM bytes will not transcribe correctly.
+        audio_data = Path("speech.webm").read_bytes()
+        chunk_size = 32000  # ~1s of webm data (varies by encoder)
         
         for i in range(0, len(audio_data), chunk_size):
             chunk = audio_data[i:i+chunk_size]
@@ -308,6 +313,7 @@ ws.send(JSON.stringify({ type: 'finalize' }));
 WHISPER_MODEL_SIZE=base
 WHISPER_COMPUTE_TYPE=float16
 OLLAMA_TEMPERATURE=0.7
+OLLAMA_ANALYSIS_MODEL=phi3:mini   # faster smell/gap scoring; pull first: ollama pull phi3:mini
 ```
 
 **RTX 3060 (12GB)**:
@@ -432,12 +438,13 @@ disk usage
 
 ## 📚 What's Next?
 
-### Build Frontend
-- React/Flutter client
-- WebSocket audio streaming
-- PDF upload modal
-- Clarification UI
-- Export confirmation
+### Frontend (Already Built)
+The React/TypeScript frontend is complete. Run it with:
+```bash
+cd Web_Frontend
+npm install  # first time only
+npm run dev  # http://localhost:3000
+```
 
 ### Extended Features
 - Multi-language support

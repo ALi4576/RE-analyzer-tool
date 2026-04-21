@@ -12,6 +12,15 @@ export interface ISORequirement {
   priority?: 'High' | 'Medium' | 'Low' | 'high' | 'medium' | 'low';
   category?: 'Functional' | 'Non-functional' | 'Interface';
   status?: 'draft' | 'approved' | 'implemented' | 'ready_for_export';
+  traceability?: string[];
+  /** Per-requirement completeness ratio across the 6 ISO fields (0.0-1.0). */
+  completeness_score?: number;
+  /**
+   * Per-requirement smell-based quality score (0.0-1.0) where 1.0 means no
+   * smells matched this requirement's text and 0.0 is worst. Drives the card
+   * meter — use this in preference to `completeness_score` when present.
+   */
+  quality_score?: number;
 }
 
 export interface RequirementSmell {
@@ -42,6 +51,8 @@ export interface AnalysisState {
   iso_requirements?: ISORequirement[];
   total_requirements?: number;
   completeness_score?: number;
+  /** Document-level average of per-requirement smell quality scores (0.0-1.0). */
+  quality_score?: number;
   ready_for_export?: boolean;
 }
 
@@ -49,6 +60,8 @@ export interface FormalizedRequirement {
   total_requirements: number;
   ready_for_export: boolean;
   completeness_score: number;
+  /** Document-level average of per-requirement smell quality scores (0.0-1.0). */
+  quality_score?: number;
   iso_requirements?: ISORequirement[];
   requirements?: ISORequirement[];
   first_requirement?: ISORequirement | null;
@@ -56,18 +69,20 @@ export interface FormalizedRequirement {
 
 export interface ExportRequest {
   session_id: string;
+  /** UI-facing target name — mapped to export_target before sending to the API. */
   target: 'jira' | 'trello' | 'pdf';
   jira_project?: string;
   trello_board?: string;
 }
 
 export interface ExportResult {
-  session_id: string;
+  export_id: string;
   target: string;
-  status: 'success' | 'error';
-  items_exported: number;
-  export_url?: string;
-  error?: string;
+  /** "success" or "failed" — backend uses "failed" not "error". */
+  status: 'success' | 'failed';
+  ticket_ids: string[];
+  url?: string;
+  timestamp?: string;
 }
 
 // API Request Types

@@ -374,7 +374,7 @@ export class WebSocketAudioStreamer {
   ): Promise<void> {
     this.sendMessage({
       type: 'clarification_response',
-      questions: clarifications,
+      clarifications: clarifications,
     });
   }
 

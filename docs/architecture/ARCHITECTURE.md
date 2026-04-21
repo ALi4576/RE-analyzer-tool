@@ -70,7 +70,7 @@ RTX 4070 Super Allocation:
 ```
 Client (Browser)
     │
-    └─→ [50ms PCM chunks]
+    └─→ [webm container chunks via MediaRecorder]
         │
         ├─→ WebSocket Server
         │   (async listener)
@@ -79,8 +79,9 @@ Client (Browser)
         │   (accumulate chunks)
         │
         ├─→ [When 5sec buffered]
-        │   └─→ Faster-Whisper
-        │       (transcribe)
+        │   └─→ Write temp .webm file
+        │       └─→ Faster-Whisper (ffmpeg decode)
+        │           (transcribe)
         │
         └─→ Send transcription
             back to client
@@ -118,8 +119,8 @@ class AudioStreamBuffer:
            │
            ▼
 ┌─────────────────────────────────────┐
-│ Browser MediaRecorder captures PCM  │
-│ (50ms chunks at 16kHz)              │
+│ Browser MediaRecorder captures webm  │
+│ (container chunks via MediaRecorder) │
 └──────────┬──────────────────────────┘
            │
            ▼
@@ -169,21 +170,22 @@ class AudioStreamBuffer:
 ```python
 workflow = StateGraph(RequirementAnalysisState)
 
-# Nodes (agent actions)
-workflow.add_node("parse_input", parse_node)
-workflow.add_node("detect_smells", smell_node)
-workflow.add_node("analyze_logic", logic_node)
-workflow.add_node("generate_questions", questions_node)
+# Nodes (agent actions) - 2 LLM calls total
+workflow.add_node("analyze_quality", analyze_quality_node)   # smell + gap in one call
 workflow.add_node("formalize", formalize_node)
+workflow.add_node("consolidate", consolidate_node)
+workflow.add_node("generate_questions", questions_node)
+workflow.add_node("export_ready", export_ready_node)
 
 # Edges define flow
-workflow.add_edge("parse_input", "detect_smells")
+workflow.add_edge("analyze_quality", "formalize")
+workflow.add_edge("formalize", "consolidate")
 workflow.add_conditional_edges(
-    "detect_smells",
+    "consolidate",
     should_interrupt,      # Decision function
     {
-        True: "generate_questions",   # High quality issues
-        False: "analyze_logic"        # OK to proceed
+        True: "generate_questions",   # High smell score → clarification
+        False: "export_ready"         # OK to export
     }
 )
 
@@ -197,42 +199,11 @@ START
   │
   ▼
 ┌─────────────────────┐
-│ Parse Input Node    │
-│ - Extract entities  │      ┌──────────────────┐
-│ - Normalize text    │─────→│ Input parsed     │
-└─────────────────────┘      └──────────────────┘
-  │
-  ▼
-┌─────────────────────┐
-│ Detect Smells Node  │      ┌──────────────────┐
-│ - Quality issues    │─────→│ Smell score: 0.8 │
-│ - Rate severity     │      │ 3 issues found   │
-└─────────────────────┘      └──────────────────┘
-  │
-  ├─── (score >= 0.7) ──→ INTERRUPT
-  │                         │
-  │                         ▼
-  │                    ┌──────────────────┐
-  │                    │ Generate Questions│
-  │                    │ Topic: "unclear"  │
-  │                    └─────────┬────────┘
-  │                              │
-  │                         [PAUSE STATE]
-  │                    Await user response
-  │                              │
-  │                    ┌─────────▼────────┐
-  │                    │Resume with answers│
-  │                    │Update input text  │
-  │                    └─────────┬────────┘
-  │                              │
-  ├───────────────────────────────┘
-  │
-  ▼
-┌─────────────────────┐
-│ Analyze Logic Node  │      ┌──────────────────┐
-│ - Find gaps         │─────→│ Logic gaps: 2    │
-│ - Check conflicts   │      │ Consistency: 0.9 │
-└─────────────────────┘      └──────────────────┘
+│ Analyze Quality Node│      ┌──────────────────────┐
+│ - Smell detection   │─────→│ Smell score: 0.8     │
+│ - Gap scoring       │      │ Gap score: 0.6       │
+│ (1 LLM call, JSON)  │      │ 3 issues found       │
+└─────────────────────┘      └──────────────────────┘
   │
   ▼
 ┌─────────────────────┐
@@ -241,6 +212,32 @@ START
 │ - Add traceability  │      │ REQ-0002         │
 └─────────────────────┘      │ ... (5 total)    │
   │                           └──────────────────┘
+  ▼
+┌─────────────────────┐
+│ Consolidate Node    │
+│ - Merge analysis    │
+│ - Check interrupt   │
+└─────────────────────┘
+  │
+  ├─── (smell_score >= 0.7) ──→ INTERRUPT
+  │                                │
+  │                                ▼
+  │                    ┌──────────────────────┐
+  │                    │ Generate Questions   │
+  │                    │ Topic: "unclear"     │
+  │                    └──────────┬───────────┘
+  │                               │
+  │                          [PAUSE STATE]
+  │                    Await user clarifications
+  │                               │
+  │                    ┌──────────▼───────────┐
+  │                    │ Resume with answers  │
+  │                    │ (answered IDs skip   │
+  │                    │  re-interrupt check) │
+  │                    └──────────┬───────────┘
+  │                               │
+  ├────────────────────────────────┘
+  │
   ▼
 ┌─────────────────────┐
 │ Export Ready Node   │      ┌──────────────────┐
@@ -365,15 +362,11 @@ key_sections = {
 
 Each node in the LangGraph represents an agent:
 
-1. **Parser Agent** (Node: `parse_input`)
-   - Input: Raw text/speech
-   - Output: Structured entities
-   - Tools: LLM for NLP
-
-2. **Smell Detector Agent** (Node: `detect_smells`)
-   - Input: Parsed requirements
-   - Output: Quality issues + scores
-   - Tools: LLM with requirement knowledge base
+1. **Quality Analyzer Agent** (Node: `analyze_quality`)
+   - Input: Raw requirement text
+   - Output: Smells list + smell score + gap score
+   - Tools: `OLLAMA_ANALYSIS_MODEL` (e.g. `phi3:mini`) with `format="json"`
+   - Single LLM call combining smell detection and logic gap scoring
    
    ```python
    SMELL_TYPES = [
@@ -385,22 +378,26 @@ Each node in the LangGraph represents an agent:
        "vague_scope",
        "missing_rationale"
    ]
+   # Smell score: min(1.0, sum(severity for each smell))
+   # Gap score:   0.0–1.0 (higher = more logical gaps)
    ```
 
-3. **Logic Analyzer Agent** (Node: `analyze_logic`)
-   - Input: Requirement text
-   - Output: Gap score + conflicts
-   - Tools: LLM reasoning
+2. **Formalizer Agent** (Node: `formalize`)
+   - Input: Requirement text (+ optional document context)
+   - Output: ISO 29148 compliant requirements
+   - Tools: Main `OLLAMA_MODEL` (e.g. `llama3`) with low temperature
+
+3. **Consolidate Node** (Node: `consolidate`)
+   - Merges quality analysis + formalized requirements
+   - Decides whether to interrupt (smell_score >= threshold)
 
 4. **Clarifier Agent** (Node: `generate_questions`)
-   - Input: Issues found
-   - Output: Targeted questions
-   - Tools: Question generation LLM
+   - Input: Smells found
+   - Output: Targeted clarification questions
+   - Tools: LLM; only runs when interrupt triggered
 
-5. **Formalizer Agent** (Node: `formalize`)
-   - Input: Clarified requirements
-   - Output: ISO 29148 compliant requirements
-   - Tools: Template engine + LLM
+5. **Export Ready Node** (Node: `export_ready`)
+   - Marks session as complete and ready for Jira/Trello export
 
 ### 5.2 Agent Communication
 
@@ -409,14 +406,14 @@ Each node in the LangGraph represents an agent:
 state = {
     "session_id": "...",
     "input_text": "User's raw requirement",
-    "parsed_analysis": "Parser output",
     "smells": [RequirementSmell, ...],
-    "smell_score": 0.75,
-    "logical_gap_score": 0.45,
+    "smell_score": 0.75,          # min(1.0, sum of severities)
+    "logical_gap_score": 0.45,    # 0=no gaps, 1=many gaps
+    "interrupt_needed": True,
     "clarification_questions": [ClarificationQuestion, ...],
     "user_clarifications": {"q1": "answer1", ...},
     "iso_requirements": [ISORequirement, ...],
-    "status": "formal_draft"
+    "status": "needs_clarification"  # or "formal_draft" / "complete"
 }
 ```
 

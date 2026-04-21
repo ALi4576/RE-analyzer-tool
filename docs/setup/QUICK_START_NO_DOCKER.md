@@ -12,7 +12,10 @@ cd f:\coding\RE_tool
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env
+# Copy env config (skip if backend/.env already exists)
+copy .env.example backend\.env
+# Optional: pull faster analysis model
+ollama pull phi3:mini
 ```
 
 ## Step 2: Start Ollama (Terminal 1)

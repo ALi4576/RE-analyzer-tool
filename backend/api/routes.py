@@ -2,17 +2,21 @@
 FastAPI routes for the RE Tool backend.
 Exposes REST and WebSocket endpoints.
 """
+import json
+import re
 import uuid
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import asyncio
 from utils import get_logger
 from models.schemas import (
     AnalyzeRequirementsRequest,
     ClarificationResponse,
     ClarifyRequest,
+    ClarifyRequirementRequest,
     ExportRequirementRequest,
+    PatchRequirementRequest,
     TranscribeAudioRequest,
     FormalizedRequirement,
     FormalizeRequest,
@@ -29,6 +33,7 @@ from services import (
     get_file_service,
     get_stream_service,
     get_reader_service,
+    get_requirement_store,
 )
 from api.websocket_handler import get_streaming_handler
 
@@ -103,6 +108,11 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
                     "priority": req.get("priority") or "Medium",
                     "category": req.get("category"),
                     "traceability": req.get("traceability") or req.get("depends_on") or [],
+                    # Per-req completeness and smell-based quality so the
+                    # frontend RequirementCard can render its own meter
+                    # without a separate round-trip.
+                    "completeness_score": req.get("completeness_score", 0.0),
+                    "quality_score": req.get("quality_score", 1.0),
                 })
 
             formalized_meta = result.get("formalized", {})
@@ -121,6 +131,10 @@ async def analyze_requirements(request: AnalyzeRequirementsRequest):
                 "iso_requirements": iso_requirements,
                 "total_requirements": len(iso_requirements),
                 "completeness_score": formalized_meta.get("completeness_score", 0.0),
+                "quality_score": formalized_meta.get(
+                    "quality_score",
+                    formalized_meta.get("completeness_score", 0.0),
+                ),
                 "ready_for_export": formalized_meta.get("ready_for_export", False),
             }
 
@@ -158,8 +172,11 @@ async def clarify_requirements(request: ClarifyRequest):
                 "priority": req.get("priority") or "Medium",
                 "category": req.get("category"),
                 "traceability": req.get("traceability") or req.get("depends_on") or [],
+                "completeness_score": req.get("completeness_score", 0.0),
+                "quality_score": req.get("quality_score", 1.0),
             })
 
+        formalized_meta = result.get("formalized", {})
         return {
             "session_id": request.session_id,
             "status": result.get("status"),
@@ -172,8 +189,12 @@ async def clarify_requirements(request: ClarifyRequest):
             },
             "iso_requirements": iso_requirements,
             "total_requirements": len(iso_requirements),
-            "completeness_score": result.get("formalized", {}).get("completeness_score", 0.0),
-            "ready_for_export": result.get("formalized", {}).get("ready_for_export", False),
+            "completeness_score": formalized_meta.get("completeness_score", 0.0),
+            "quality_score": formalized_meta.get(
+                "quality_score",
+                formalized_meta.get("completeness_score", 0.0),
+            ),
+            "ready_for_export": formalized_meta.get("ready_for_export", False),
         }
 
     except Exception as e:
@@ -303,6 +324,8 @@ async def formalize_requirements(request: FormalizeRequest):
             )
 
         raw_requirements = state.values.get("requirements", [])
+        # Apply session overlay patches (user edits live outside the checkpointer).
+        raw_requirements = get_requirement_store().merge(session_id, raw_requirements)
 
         # Coerce raw dicts → validated ISORequirement fields with safe defaults
         iso_requirements = []
@@ -318,16 +341,27 @@ async def formalize_requirements(request: FormalizeRequest):
                 "priority": req.get("priority") or "Medium",
                 "category": req.get("category"),
                 "traceability": req.get("traceability") or req.get("depends_on") or [],
+                "completeness_score": req.get("completeness_score", 0.0),
+                "quality_score": req.get("quality_score", 1.0),
             })
 
-        completeness = state.values.get("formalized", {}).get("completeness_score", 0.0)
+        formalized_meta = state.values.get("formalized", {})
+        completeness = formalized_meta.get("completeness_score", 0.0)
+        quality = formalized_meta.get("quality_score", completeness)
+
+        # Do NOT mark a session export-ready while it is awaiting clarification —
+        # otherwise the frontend would let the user export a draft built from
+        # requirements that the pipeline flagged as needing human input.
+        interrupt_needed = state.values.get("interrupt_needed", False)
+        ready_for_export = len(iso_requirements) > 0 and not interrupt_needed
 
         return FormalizedRequirement(
             iso_requirements=iso_requirements,
             summary=f"Found {len(iso_requirements)} ISO 29148 requirements",
             total_requirements=len(iso_requirements),
             completeness_score=completeness,
-            ready_for_export=len(iso_requirements) > 0,
+            quality_score=quality,
+            ready_for_export=ready_for_export,
             export_formats=["jira", "trello"],
         )
 
@@ -336,6 +370,192 @@ async def formalize_requirements(request: FormalizeRequest):
     except Exception as e:
         logger.error(f"Formalization error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============ Per-Requirement Edit Endpoints ============
+
+
+def _find_requirement(requirements: list, requirement_id: str) -> Optional[dict]:
+    """Locate a requirement dict by its requirement_id, or return None."""
+    for req in requirements:
+        if isinstance(req, dict) and req.get("requirement_id") == requirement_id:
+            return req
+    return None
+
+
+def _coerce_iso_fields(req: dict, fallback_idx: int = 1) -> dict:
+    """Normalize a requirement dict to the outward-facing ISO field shape."""
+    return {
+        "requirement_id": req.get("requirement_id") or f"REQ-{fallback_idx:04d}",
+        "title": req.get("title") or "Untitled Requirement",
+        "shall_statement": req.get("shall_statement") or "The system shall meet this requirement.",
+        "rationale": req.get("rationale") or "",
+        "acceptance_criteria": req.get("acceptance_criteria") or [],
+        "priority": req.get("priority") or "Medium",
+        "category": req.get("category"),
+        "traceability": req.get("traceability") or req.get("depends_on") or [],
+    }
+
+
+@router.patch("/requirements/{session_id}/{requirement_id}")
+async def patch_requirement(session_id: str, requirement_id: str, request: PatchRequirementRequest):
+    """
+    Apply a partial update to a single requirement within a session.
+
+    Updates are stored in an overlay keyed by (session_id, requirement_id) and
+    merged on every read path. The underlying LangGraph checkpoint is not
+    mutated, so in-flight analyses cannot clobber user edits.
+    """
+    try:
+        agent = get_agent()
+        config = {"configurable": {"thread_id": session_id}}
+        state = agent.app.get_state(config)
+
+        if not state.values:
+            raise HTTPException(status_code=404, detail="No data found for this session ID")
+
+        store = get_requirement_store()
+        patch_fields = request.dict(exclude_none=True)
+        store.patch(session_id, requirement_id, patch_fields)
+
+        raw_requirements = state.values.get("requirements", [])
+        merged_requirements = store.merge(session_id, raw_requirements)
+
+        updated = _find_requirement(merged_requirements, requirement_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Requirement '{requirement_id}' not found")
+
+        # Find original positional index for stable fallback id generation.
+        idx = 1
+        for i, req in enumerate(merged_requirements, 1):
+            if isinstance(req, dict) and req.get("requirement_id") == requirement_id:
+                idx = i
+                break
+
+        return _coerce_iso_fields(updated, fallback_idx=idx)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Patch requirement error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _extract_json_object(text: str) -> dict:
+    """
+    Best-effort extraction of a JSON object from an LLM response.
+
+    The analysis_llm is configured with ``format="json"`` so responses are
+    already JSON, but models occasionally wrap output in prose or code fences.
+    """
+    if not text:
+        raise ValueError("Empty LLM response")
+    # Direct parse — the expected happy path under format="json".
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Strip triple-backtick fences if present.
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        return json.loads(fenced.group(1))
+    # Last resort: grab the first top-level {...} block.
+    brace = re.search(r"\{.*\}", text, re.DOTALL)
+    if brace:
+        return json.loads(brace.group(0))
+    raise ValueError("No JSON object found in LLM response")
+
+
+@router.post("/requirements/{session_id}/{requirement_id}/clarify")
+async def clarify_requirement(session_id: str, requirement_id: str, request: ClarifyRequirementRequest):
+    """
+    Refine a single requirement by re-prompting the LLM with additional user context.
+
+    The improved fields are stored in the overlay (never written back to the
+    LangGraph checkpoint). If the LLM call or JSON parse fails, the store is
+    left untouched and the endpoint returns 500.
+    """
+    try:
+        agent = get_agent()
+        config = {"configurable": {"thread_id": session_id}}
+        state = agent.app.get_state(config)
+
+        if not state.values:
+            raise HTTPException(status_code=404, detail="No data found for this session ID")
+
+        store = get_requirement_store()
+        raw_requirements = state.values.get("requirements", [])
+        merged_requirements = store.merge(session_id, raw_requirements)
+
+        target = _find_requirement(merged_requirements, requirement_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Requirement '{requirement_id}' not found")
+
+        # Build the prompt. Send only the fields the LLM is meant to reason about.
+        req_for_prompt = {
+            "requirement_id": target.get("requirement_id"),
+            "title": target.get("title"),
+            "shall_statement": target.get("shall_statement"),
+            "rationale": target.get("rationale"),
+            "acceptance_criteria": target.get("acceptance_criteria") or [],
+            "priority": target.get("priority"),
+            "category": target.get("category"),
+        }
+        prompt = (
+            "You are a requirements engineer. Improve the following ISO 29148 "
+            "requirement using this additional context. Return ONLY a JSON object "
+            "with these fields: title, shall_statement, rationale, "
+            "acceptance_criteria (list), priority, category. "
+            f"Requirement: {json.dumps(req_for_prompt, ensure_ascii=False)}. "
+            f"Additional context: {request.additional_context}"
+        )
+
+        # agent.analysis_llm is the fast, JSON-formatted Ollama model (see agents.py:60-68).
+        # Run the blocking model call off the event loop.
+        try:
+            llm_response = await asyncio.to_thread(agent.analysis_llm.invoke, prompt)
+        except Exception as e:
+            logger.error(f"Clarify LLM call failed for {requirement_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="LLM refinement failed")
+
+        # LangChain LLMs may return str or an object with .content.
+        text = llm_response if isinstance(llm_response, str) else getattr(llm_response, "content", str(llm_response))
+
+        try:
+            improved = _extract_json_object(text)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.error(f"Clarify parse failed for {requirement_id}: {e}; raw={text!r}")
+            raise HTTPException(status_code=500, detail="Failed to parse LLM response")
+
+        # Whitelist the allowed overlay fields to keep the store honest.
+        allowed_fields = {"title", "shall_statement", "rationale", "acceptance_criteria", "priority", "category"}
+        patch_fields = {k: v for k, v in improved.items() if k in allowed_fields and v is not None}
+        if not patch_fields:
+            raise HTTPException(status_code=500, detail="LLM returned no usable fields")
+
+        # Apply patch only after both call and parse succeeded.
+        store.patch(session_id, requirement_id, patch_fields)
+
+        # Re-merge so response reflects latest overlay.
+        merged_requirements = store.merge(session_id, raw_requirements)
+        updated = _find_requirement(merged_requirements, requirement_id)
+        if updated is None:
+            # Practically unreachable — we matched before patching.
+            raise HTTPException(status_code=500, detail="Requirement disappeared after patch")
+
+        idx = 1
+        for i, req in enumerate(merged_requirements, 1):
+            if isinstance(req, dict) and req.get("requirement_id") == requirement_id:
+                idx = i
+                break
+
+        return {"iso_requirements": [_coerce_iso_fields(updated, fallback_idx=idx)]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Clarify requirement error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============ Export Endpoints ============
 
@@ -349,6 +569,8 @@ async def export_requirements(request: ExportRequirementRequest):
         config = {"configurable": {"thread_id": request.session_id}}
         state = agent.app.get_state(config)
         raw_requirements = state.values.get("requirements", [])
+        # Apply session overlay patches before building export payload.
+        raw_requirements = get_requirement_store().merge(request.session_id, raw_requirements)
 
         if not raw_requirements:
             raise HTTPException(status_code=400, detail="No formalized requirements found to export.")
@@ -420,6 +642,41 @@ async def export_dry_run(request: ExportRequirementRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/export/pdf/{session_id}")
+async def export_pdf(session_id: str):
+    """Generate and download a PDF of the formalized requirements for a session."""
+    try:
+        from core.exporter import PdfExporter
+
+        agent = get_agent()
+        config = {"configurable": {"thread_id": session_id}}
+        state = agent.app.get_state(config)
+        raw_requirements = state.values.get("requirements", []) if state.values else []
+        # Apply session overlay patches so the PDF reflects user edits.
+        raw_requirements = get_requirement_store().merge(session_id, raw_requirements)
+
+        if not raw_requirements:
+            raise HTTPException(status_code=404, detail="No requirements found for this session.")
+
+        pdf_path = await asyncio.to_thread(
+            PdfExporter().export_requirements,
+            raw_requirements,
+            session_id,
+        )
+
+        return FileResponse(
+            path=pdf_path,
+            media_type="application/pdf",
+            filename=f"requirements_{session_id[:12]}.pdf",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PDF export error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============ Health & Status Endpoints ============
 
 @router.get("/health")
@@ -475,7 +732,7 @@ async def websocket_stream(websocket: WebSocket, session_id: str, context_file: 
 
     Client -> Server:
     - audio_chunk: {type: "audio_chunk", data: base64_audio, chunk_number: N}
-    - clarification_response: {type: "clarification_response", questions: {q_id: answer}}
+    - clarification_response: {type: "clarification_response", clarifications: {q_id: answer}}
     - finalize: {type: "finalize"}
     - status: {type: "status"}
 

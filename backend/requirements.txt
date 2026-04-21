@@ -13,10 +13,13 @@ ollama==0.1.0           # Ollama client for local LLM
 langchain==0.1.0
 langchain-ollama==0.0.1
 langgraph==0.0.20       # Stateful graph orchestration
+# TODO: upgrade to langgraph>=0.2.0 to enable native interrupt()/Command(resume=...) pattern
+#       which avoids the full pipeline re-run on clarification resume
 
 # ============ Document Processing ============
 PyMuPDF==1.23.0         # PDF extraction
 python-docx==0.8.11     # DOCX support
+reportlab==4.2.5        # PDF generation for export
 pydantic==2.5.0         # Data validation
 
 # ============ Integration APIs ============

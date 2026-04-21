@@ -14,7 +14,7 @@ class APIClient {
   constructor() {
     this.client = axios.create({
       baseURL: '/api',
-      timeout: 30000,
+      timeout: 90000,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -88,13 +88,40 @@ class APIClient {
     });
     return data;
   }
+  async patchRequirement(
+    sessionId: string,
+    requirementId: string,
+    fields: Partial<{ title: string; shall_statement: string; rationale: string; acceptance_criteria: string[]; priority: string }>
+  ): Promise<any> {
+    const { data } = await this.client.patch(
+      `/requirements/${sessionId}/${requirementId}`,
+      fields
+    );
+    return data;
+  }
+
+  async clarifyOneRequirement(
+    sessionId: string,
+    requirementId: string,
+    additionalContext: string
+  ): Promise<any> {
+    const { data } = await this.client.post(
+      `/requirements/${sessionId}/${requirementId}/clarify`,
+      { additional_context: additionalContext }
+    );
+    return data;
+  }
+
   async exportRequirements(request: ExportRequest): Promise<ExportResult> {
-    const { data } = await this.client.post('/export', request);
+    // Backend uses `export_target`; frontend type uses `target` for UI clarity.
+    const { target, ...rest } = request;
+    const { data } = await this.client.post('/export', { ...rest, export_target: target });
     return data;
   }
 
   async exportDryRun(request: ExportRequest): Promise<any> {
-    const { data } = await this.client.post('/export/dry-run', request);
+    const { target, ...rest } = request;
+    const { data } = await this.client.post('/export/dry-run', { ...rest, export_target: target });
     return data;
   }
 

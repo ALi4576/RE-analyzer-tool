@@ -94,16 +94,17 @@ A sophisticated, production-ready backend for automated requirements engineering
 │  │  - HITL interrupt handling                   │
 │  │                                              │
 │  ├─ Service Layer                              │
-│  │  - StreamAudioService (PCM → Whisper)      │
+│  │  - StreamAudioService (webm → Whisper)     │
 │  │  - FileUploadService (PDF/Audio)            │
 │  │  - DocumentReaderService (Context)          │
 │  │                                              │
 │  └─ Core Agents (LangGraph)                    │
-│     Parse → Smell Detection                    │
+│     Analyze Quality (smell + gap, 1 LLM call)  │
 │         ↓                                       │
+│     Formalize → Consolidate                    │
 │     [Interrupt Check]                          │
 │     YES → Generate Questions → WAIT             │
-│     NO  → Logic Analysis → Formalize → Export  │
+│     NO  → Export Ready                         │
 │                                                 │
 │  ├─ Transcriber (Faster-Whisper)               │
 │  │  - GPU: float16 precision                   │
@@ -178,7 +179,7 @@ A sophisticated, production-ready backend for automated requirements engineering
 
 ### ✅ Real-Time Audio Streaming
 - WebSocket binary protocol
-- PCM chunk accumulation (5-second buffering)
+- webm container chunk accumulation (5-second buffering)
 - Parallel transcription with LangGraph
 - Live transcription feedback to frontend
 
@@ -407,22 +408,25 @@ See `GETTING_STARTED.md` for Python & JavaScript examples
 
 ---
 
-## 🎯 What's Ready for Frontend
+## 🎯 Frontend: Built & Connected
 
-The backend is **fully functional** and ready to receive connections from:
-- ✅ React/Vue/Angular web apps
-- ✅ Flutter mobile apps
-- ✅ Custom Python clients
-- ✅ Any WebSocket-capable client
+The React/TypeScript frontend is **production-ready** and fully integrated with the backend.
+
+**Stack**: React 18 · TypeScript · Vite · Tailwind CSS · Framer Motion · Zustand · Axios
+
+**Runs on**: http://localhost:3000 (proxies `/api` → backend at port 8000)
 
 ### Frontend Integration Checklist
-- [ ] WebSocket audio streaming (MediaRecorder API)
-- [ ] PDF upload modal
-- [ ] Clarification question UI
-- [ ] ISO requirements table display
-- [ ] Export confirmation dialog
-- [ ] Session management
-- [ ] Error handling & retry logic
+- [x] WebSocket audio streaming (MediaRecorder API via `VoiceRecorder` + `audioStreaming.ts`)
+- [x] PDF upload modal (`DocumentUpload` component)
+- [x] Clarification question UI (`ClarificationPanel` — animated modal with progress bar)
+- [x] ISO requirements display (`RequirementFeed` + `RequirementCard` — ISO 29148 fields)
+- [x] Export confirmation dialog (`RequirementViewer` with Jira/Trello export)
+- [x] Session management (Zustand store + `generateSessionId`)
+- [x] Error handling & retry logic (global notification system in store)
+- [x] Light/dark theme toggle (persisted to `localStorage`, follows system preference)
+- [x] Quality smell meter (`SmellMeter` — animated progress bar with Good/Warning/Critical tiers)
+- [x] Incremental/streaming analysis (50-char trigger via `analyzeRequirementsIncremental`)
 
 ---
 
