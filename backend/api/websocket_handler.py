@@ -271,11 +271,8 @@ class StreamingAnalysisHandler:
             requirements_list = result.get("requirements", [])
             formalized_data = result.get("formalized", {})
             completeness_score = formalized_data.get("completeness_score", 0)
-            # Per-requirement smell-based quality — drives the frontend
-            # smell meter both per-card and in the feed footer. Falls back
-            # to completeness for backwards compatibility when the backend
-            # has not yet attached it (e.g. older sessions).
             quality_score = formalized_data.get("quality_score", completeness_score)
+            overall_score = formalized_data.get("overall_score", quality_score)
 
             # Send analysis update with MANDATORY requirements_list field
             await self.ws_manager.send_message(
@@ -290,6 +287,7 @@ class StreamingAnalysisHandler:
                     "requirements_count": len(requirements_list),
                     "completeness_score": completeness_score,
                     "quality_score": quality_score,
+                    "overall_score": overall_score,
 
                     # SCORING INFO (SECONDARY):
                     "analysis_summary": {
@@ -335,6 +333,7 @@ class StreamingAnalysisHandler:
             formalized_data = result.get("formalized", {})
             completeness_score = formalized_data.get("completeness_score", 0)
             quality_score = formalized_data.get("quality_score", completeness_score)
+            overall_score = formalized_data.get("overall_score", quality_score)
 
             await self.ws_manager.send_message(
                 session_id,
@@ -347,6 +346,7 @@ class StreamingAnalysisHandler:
                     "requirements_count": len(requirements_list),
                     "completeness_score": completeness_score,
                     "quality_score": quality_score,
+                    "overall_score": overall_score,
 
                     # SCORING INFO:
                     "analysis_summary": {

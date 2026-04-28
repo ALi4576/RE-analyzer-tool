@@ -60,7 +60,7 @@ export const ClarificationPanel: React.FC<ClarificationPanelProps> = ({
   }
 
   return (
-    <div className="flex flex-col max-h-full">
+    <div className="flex flex-col flex-1 min-h-0 max-h-full">
       {/* Header */}
       <div
         className="px-6 py-5"

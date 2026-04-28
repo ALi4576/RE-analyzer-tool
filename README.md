@@ -1,656 +1,264 @@
-# Multi-Agentic Requirements Engineering Tool
+# RE_tool — Multi-Agentic Requirements Engineering Tool
 
-> **Automated requirements engineering pipeline using RTX 4070 Super, Faster-Whisper transcription, and Ollama-powered AI agents with Human-in-the-Loop interrupts.**
+> Automated requirements engineering pipeline that ingests live audio or documents, detects requirement smells with local LLM agents, runs a Human-in-the-Loop clarification loop, and exports ISO 29148-compliant tickets to Jira or Trello.
 
-## 🎯 Overview
+## Overview
 
-This backend system orchestrates a sophisticated multi-agent pipeline for requirements engineering:
+- **Ingest** live microphone streams (WebSocket) or PDF/document uploads.
+- **Transcribe** speech in real time with Faster-Whisper (CTranslate2, GPU).
+- **Analyze** transcripts through a LangGraph agent squad backed by local Ollama models — detecting ambiguity, gaps, and contradictions.
+- **Clarify** through a Human-in-the-Loop interrupt: workflow pauses, asks questions, then resumes from the exact checkpoint.
+- **Formalize** outputs to the ISO 29148 standard and **export** directly to Jira or Trello.
 
-1. **Ingestion**: Live WebSocket audio streams + PDF/document uploads
-2. **Transcription**: Real-time with Faster-Whisper (CTranslate2)
-3. **Analysis**: LLM-powered agent squad detecting requirement smells & gaps
-4. **Verification**: Context injection from PDFs as ground truth
-5. **Refinement**: Human-in-the-Loop for ambiguous requirements
-6. **Formalization**: Automatic ISO 29148 compliance formatting
-7. **Export**: Direct Jira/Trello ticket generation
-
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  FRONTEND (Flutter/React)                                   │
-│  - Microphone stream                                        │
-│  - File uploads (PDFs)                                      │
-│  - Clarification UI (WebSocket)                             │
+│  FRONTEND (React — Web_Frontend/)                            │
+│  - Microphone stream                                         │
+│  - File uploads (PDFs)                                       │
+│  - Clarification UI (WebSocket)                              │
 └────────────────┬────────────────────────────────────────────┘
                  │ WebSocket / REST
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  FastAPI BACKEND (async/await)                              │
+│  FastAPI BACKEND (async/await)                               │
 │                                                              │
-│  ┌─── WebSocket Handler ───────────────────────────────┐   │
-│  │ • Audio chunk buffering                     │
-│  │ • Real-time transcription                   │
-│  │ • HITL interrupt handling                   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─── WebSocket Handler ──────────────────────────────┐    │
+│  │ • Audio chunk buffering                             │    │
+│  │ • Real-time transcription                           │    │
+│  │ • HITL interrupt handling                           │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                              │
-│  ┌─── Service Layer ────────────────────────────────┐   │
-│  │ • StreamAudioService (PCM → Whisper)              │
-│  │ • FileUploadService (PDF/Audio upload)            │
-│  │ • DocumentReaderService (Context extraction)      │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─── Service Layer ──────────────────────────────────┐    │
+│  │ • StreamAudioService (PCM → Whisper)                │    │
+│  │ • FileUploadService (PDF/Audio upload)              │    │
+│  │ • DocumentReaderService (Context extraction)        │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                              │
-│  ┌─── Core Agents (LangGraph State Machine) ──────────┐   │
-│  │  Parse Input → Detect Smells                        │   │
-│  │       ↓                                              │   │
-│  │  [Smell Score >= Threshold?]                        │   │
-│  │  YES → Generate Questions → INTERRUPT & WAIT        │   │
-│  │  NO  → Analyze Logic → Formalize → Export Ready     │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─── Core Agents (LangGraph State Machine) ──────────┐    │
+│  │  Parse Input → Detect Smells                        │    │
+│  │       ↓                                              │    │
+│  │  [Smell Score >= Threshold?]                        │    │
+│  │  YES → Generate Questions → INTERRUPT & WAIT        │    │
+│  │  NO  → Analyze Logic → Formalize → Export Ready     │    │
+│  └─────────────────────────────────────────────────────┘    │
 │                                                              │
-│  ┌─── Core Modules ─────────────────────────────────┐   │
-│  │ • TranscriberEngine (Faster-Whisper)                │
-│  │ • ContextInjectionManager (PDF ground truth)        │
-│  │ • RequirementsAnalysisAgent (LLM + LangGraph)       │
-│  │ • ISO29148Formalizer (Compliance formatter)         │
-│  │ • ExportManager (Jira + Trello)                     │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─── Core Modules ───────────────────────────────────┐    │
+│  │ • TranscriberEngine (Faster-Whisper)                │    │
+│  │ • ContextInjectionManager (PDF ground truth)        │    │
+│  │ • RequirementsAnalysisAgent (LLM + LangGraph)       │    │
+│  │ • ISO29148Formalizer (Compliance formatter)         │    │
+│  │ • ExportManager (Jira + Trello)                     │    │
+│  └─────────────────────────────────────────────────────┘    │
 └─────────────────┬────────────────────────────────────────────┘
                   │
         ┌─────────┼─────────┐
         ▼         ▼         ▼
     ╔═══════╗ ╔═══════╗ ╔═══════════╗
     ║Ollama ║ ║Whisper║ ║ (DB)      ║
-    ║Llama3 ║ ║CTranslate2║         ║
+    ║Llama3 ║ ║CT2    ║ ║ Storage   ║
     ╚═══════╝ ╚═══════╝ ╚═══════════╝
-        GPU    GPU       Storage
+        GPU      GPU
 ```
 
-## 🚀 Quick Start
+For a deeper walkthrough, see [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md).
 
-### Prerequisites
+## Prerequisites
 
-```bash
-# Graphics
-- RTX 4070 Super (12GB VRAM)
-- CUDA 11.8+
-- cuDNN
+- **GPU**: NVIDIA GPU with 8GB+ VRAM (originally tuned for RTX 4070 Super, 12GB)
+- **CUDA**: 11.8+ with cuDNN
+- **Python**: 3.10 or newer
+- **Ollama**: running locally on port `11434` with at least one model pulled (e.g. `ollama pull llama3`)
+- **Node.js**: 18+ (only required if running the React frontend)
 
-# Services
-- Ollama running locally on port 11434
-  $ ollama pull llama3
-  $ ollama serve
-
-# OS
-- Python 3.10+
-- pip/conda
-```
-
-### Setup
+## Quick Start
 
 ```bash
-# 1. Clone repository
-cd f:\coding\RE_tool
-
-# 2. Create virtual environment
+# 1. Create and activate a virtual environment
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate              # Windows
+# source venv/bin/activate         # macOS/Linux
 
-# 3. Install dependencies
+# 2. Install backend dependencies
 pip install -r requirements.txt
 
-# 4. Configure environment
-cp .env.example .env
-# Edit .env with your settings
+# 3. Configure environment
+cp backend/.env.example backend/.env
+# edit backend/.env with your values
 
-# 5. Start Ollama (in separate terminal)
+# 4. Start Ollama in a separate terminal
 ollama serve
 
-# 6. Run backend
+# 5. Run the backend
 python main.py
-
-# 7. Access API
-# REST: http://localhost:8000/api/docs
-# WebSocket: ws://localhost:8000/api/ws/stream/{session_id}
 ```
 
-## 📡 API Endpoints
+The API is then served at `http://localhost:8000/api/docs` (Swagger UI) and `ws://localhost:8000/api/ws/stream/{session_id}`.
 
-### REST Endpoints
+For the full walkthrough (frontend, troubleshooting, alternative setups), see [docs/setup/GETTING_STARTED.md](docs/setup/GETTING_STARTED.md) or the leaner [docs/setup/QUICK_START_NO_DOCKER.md](docs/setup/QUICK_START_NO_DOCKER.md).
 
-#### Analysis
-```http
-POST /api/analyze
-Content-Type: application/json
-
-{
-  "session_id": "uuid",
-  "text": "The system shall...",
-  "context_file_path": "/path/to/charter.pdf"  # Optional
-}
-
-Response:
-{
-  "session_id": "uuid",
-  "status": "needs_clarification",
-  "interrupt_needed": true,
-  "clarification_questions": [
-    {
-      "question_id": "q1",
-      "question": "What is the expected response time?",
-      "context": "Performance requirement mentioned but not specified",
-      "required_clarity": ["response_time", "unit"]
-    }
-  ]
-}
-```
-
-#### Clarification
-```http
-POST /api/clarify
-Content-Type: application/json
-
-{
-  "session_id": "uuid",
-  "question_id": "q1",
-  "user_response": "Less than 500ms for 95th percentile"
-}
-```
-
-#### Transcription
-```http
-POST /api/transcribe
-Content-Type: application/json
-
-{
-  "file_path": "/path/to/audio.wav",
-  "language": "en"
-}
-
-Response:
-{
-  "text": "The user said...",
-  "length": 1234,
-  "language": "en"
-}
-```
-
-#### File Upload
-```http
-POST /api/upload/document
-Content-Type: multipart/form-data
-
-file: <PDF_FILE>
-
-Response:
-{
-  "session_id": "uuid",
-  "file_path": "/data/uploads/session_id/charter.pdf",
-  "summary": {
-    "title": "Project Charter",
-    "type": "pdf",
-    "section_count": 12,
-    "sections": [...]
-  }
-}
-```
-
-#### Export
-```http
-POST /api/export
-Content-Type: application/json
-
-{
-  "session_id": "uuid",
-  "export_target": "jira"
-}
-
-Response:
-{
-  "export_id": "uuid",
-  "target": "jira",
-  "ticket_ids": ["PROJ-123", "PROJ-124"],
-  "status": "success",
-  "url": "https://jira.com/browse/PROJ"
-}
-```
-
-### WebSocket Endpoint
-
-#### Connection
-```
-ws://localhost:8000/api/ws/stream/{session_id}?context_file=/path/to/pdf
-```
-
-#### Message Protocol
-
-**Client → Server:**
-```javascript
-// Audio chunk
-{
-  "type": "audio_chunk",
-  "data": "base64_encoded_pcm_audio",
-  "chunk_number": 1
-}
-
-// Clarification response
-{
-  "type": "clarification_response",
-  "questions": {
-    "q1": "Less than 500ms",
-    "q2": "User-facing action"
-  }
-}
-
-// Finalize stream
-{
-  "type": "finalize"
-}
-
-// Check status
-{
-  "type": "status"
-}
-```
-
-**Server → Client:**
-```javascript
-// Connection ready
-{
-  "type": "connection_ready",
-  "session_id": "uuid",
-  "context_loaded": true
-}
-
-// Chunk acknowledged with transcription
-{
-  "type": "chunk_ack",
-  "chunk_number": 1,
-  "transcription": "The system shall handle..."
-}
-
-// New transcription available
-{
-  "type": "transcription",
-  "text": "...user's spoken words...",
-  "accumulated_text": "Full accumulated speech"
-}
-
-// HITL Interrupt - requires clarification
-{
-  "type": "interrupt",
-  "session_id": "uuid",
-  "questions": [
-    {
-      "question_id": "q1",
-      "question": "Is this a functional or non-functional requirement?",
-      "context": "The requirement uses unclear language",
-      "required_clarity": ["requirement_type"]
-    }
-  ],
-  "analysis_state": {
-    "smell_score": 0.82,
-    "smells": [...]
-  }
-}
-
-// Analysis complete
-{
-  "type": "analysis_complete",
-  "status": "formal_draft",
-  "analysis": {
-    "iso_requirements": [...],
-    "completeness_score": 0.91,
-    "export_formats": ["json", "csv", "jira", "trello"]
-  }
-}
-
-// Error
-{
-  "type": "error",
-  "error": "Error message"
-}
-```
-
-## 💡 Key Concepts
+## Key Concepts
 
 ### Context Injection
 
-When a user uploads a PDF (e.g., Project Charter) **before** speaking requirements, the system uses it as "Ground Truth":
+When a user uploads a PDF (e.g. a project charter) before speaking, the system treats that document as ground truth. Spoken requirements are validated against the PDF — contradictions are flagged, missing referenced sections are identified, and the agent will ask for clarification on conflicts. This avoids analyzing requirements "in a vacuum."
 
-```
-PDF Content (Ground Truth)
-     ↓
-[AI Agent Analysis]
-     ↓
-- Verify spoken requirements against PDF
-- Flag contradictions
-- Identify missing referenced sections
-- Request clarifications on conflicts
-```
+### Human-in-the-Loop (HITL)
 
-This prevents requirements from being analyzed "in a vacuum."
-
-### Human-in-the-Loop Pattern
-
-When analysis detects quality issues (smell score ≥ 0.7):
-
-```
-Analysis Running
-     ↓
-[Detect High Smell Score]
-     ↓
-State saved (LangGraph checkpoint)
-     ↓
-INTERRUPT: Send clarification questions to frontend
-     ↓
-[User responds via WebSocket]
-     ↓
-Resume workflow from exact checkpoint
-     ↓
-Continue analysis with clarified input
-```
+When the smell score crosses the configured threshold, the LangGraph workflow checkpoints its state, sends clarification questions over the WebSocket, and waits. Once the user responds, execution resumes from the exact checkpoint with the clarified input — no replay of prior work. See the architecture doc for state machine details.
 
 ### ISO 29148 Compliance
 
-Requirements are formatted with:
+Every formalized requirement carries a unique ID, an imperative "shall" statement, rationale, measurable acceptance criteria, traceability links, priority, and category (Functional / Non-functional / Interface). This makes outputs directly consumable by Jira/Trello and audit-ready.
 
-- **Unique ID**: REQ-0001, REQ-0002, ...
-- **Shall Statement**: Imperative language ("The system shall...")
-- **Rationale**: Business justification
-- **Acceptance Criteria**: Measurable, testable conditions
-- **Traceability**: Links to related requirements
-- **Priority**: High/Medium/Low
-- **Category**: Functional/Non-functional/Interface
+## Configuration
 
-## 📊 Data Models
-
-### RequirementAnalysisState
-
-Tracks the entire journey of a requirement:
-
-```python
-{
-  "session_id": "uuid",
-  "input_text": "Raw user input or transcribed speech",
-  "context_docs": [
-    {
-      "extracted_text": "PDF content...",
-      "key_sections": {...}
-    }
-  ],
-  "analysis_results": {
-    "status": "analyzing|needs_clarification|formal_draft",
-    "smell_score": 0.75,
-    "smells": [
-      {
-        "type": "ambiguous",
-        "severity": 0.9,
-        "location": "excerpt...",
-        "recommendation": "..."
-      }
-    ]
-  },
-  "user_clarifications": {
-    "q1": "User's answer to question 1"
-  },
-  "formalized": {
-    "iso_requirements": [ISORequirement],
-    "completeness_score": 0.91
-  },
-  "export_results": [ExportResult],
-  "iteration_count": 2
-}
-```
-
-### ISORequirement
-
-Standard requirement format:
-
-```python
-{
-  "requirement_id": "REQ-0001",
-  "title": "User Authentication",
-  "shall_statement": "The system shall authenticate users within 2 seconds",
-  "rationale": "Prevents unauthorized access",
-  "acceptance_criteria": [
-    "✓ Valid credentials accepted",
-    "✓ Invalid credentials rejected",
-    "✓ Response time < 2s"
-  ],
-  "priority": "High",
-  "category": "Functional",
-  "traceability": ["REQ-0002", "REQ-0003"]
-}
-```
-
-## 🔧 Configuration
-
-Edit `.env`:
+All runtime configuration lives in `backend/.env` (template: [`backend/.env.example`](backend/.env.example)). Key variables:
 
 ```bash
-# GPU Settings
-WHISPER_MODEL_SIZE=base           # tiny|base|small|medium|large
-WHISPER_COMPUTE_TYPE=float16      # float32|float16
-OLLAMA_MODEL=llama3               # Your LLM model
+# ============ LLM Provider Configuration ============
+LLM_PROVIDER=ollama          # main/fallback role  (ollama | openai | anthropic | google)
+LLM_MODEL=                   # main model name
 
-# Analysis Thresholds
-SMELL_SCORE_THRESHOLD=0.7         # Interrupt if >= 0.7
-LOGICAL_GAP_THRESHOLD=0.65
+# Role-specific overrides (inherit LLM_PROVIDER / LLM_MODEL when left empty)
+ANALYSIS_LLM_PROVIDER=       # smell/gap detection role
+ANALYSIS_LLM_MODEL=          # model for smell/gap role
+FORMALIZE_LLM_PROVIDER=      # ISO formalize role
+FORMALIZE_LLM_MODEL=         # model for ISO formalize role
 
-# Export Backends
+# API keys (only required for the providers you use)
+# OPENAI_API_KEY=
+# ANTHROPIC_API_KEY=
+# GOOGLE_API_KEY=
+
+# Ollama (used when LLM_PROVIDER=ollama)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+
+# Whisper
+WHISPER_MODEL_SIZE=base       # tiny | base | small | medium | large
+WHISPER_DEVICE=cuda
+WHISPER_COMPUTE_TYPE=float16
+
+# FastAPI
+FASTAPI_HOST=0.0.0.0
+FASTAPI_PORT=8000
+
+# LangGraph checkpointing
+CHECKPOINTER_TYPE=memory      # memory | sqlite | postgres
+
+# Export integrations
 JIRA_ENABLED=True
-JIRA_SERVER_URL=...
-JIRA_API_TOKEN=...
+TRELLO_ENABLED=True
 ```
 
-## 📈 Performance Optimization
+Role-specific providers (`ANALYSIS_LLM_PROVIDER`, `FORMALIZE_LLM_PROVIDER`) inherit `LLM_PROVIDER` when left empty — set them only when you want a different model for smell detection or ISO formalization than the main role.
 
-### RTX 4070 Super Specifics
+### Switching LLM provider
 
-- **Whisper (float16)**: 1-2s for 1min audio
-- **Ollama (Llama 3)**: 50-100 tokens/sec
-- **Concurrent**: ~4-6 concurrent streams
+The backend supports four providers behind a unified interface. Pick one and set the matching `.env` snippet. The non-Ollama providers require an extra pip install (kept optional so the base install stays slim).
 
-### Resource Usage
-- **VRAM**: 8-10GB (Whisper + LLM)
-- **CPU**: 4-8 cores
-- **Disk**: 50GB for models
+**Ollama (default — local, no API key)**
 
-### Optimization Tips
-
-1. **Batch Processing**: Use file uploads for high volume
-2. **Stream Buffering**: WebSocket sends ~5sec chunks
-3. **Async I/O**: FastAPI handles concurrency
-4. **Model Caching**: Loaded once, reused across requests
-
-## 🔗 Integration Examples
-
-### Python Client
-```python
-import asyncio
-import websockets
-import base64
-
-async def stream_audio():
-    async with websockets.connect(
-        "ws://localhost:8000/api/ws/stream/my-session"
-    ) as ws:
-        # Send audio chunks
-        with open("speech.wav", "rb") as f:
-            chunk = f.read(3200)  # ~200ms at 16kHz
-            await ws.send_json({
-                "type": "audio_chunk",
-                "data": base64.b64encode(chunk).decode(),
-                "chunk_number": 1
-            })
-        
-        # Wait for analysis
-        response = await ws.recv()
-        print(response)
-
-asyncio.run(stream_audio())
+```bash
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-### JavaScript Client (React)
-```javascript
-const ws = new WebSocket(
-  `ws://localhost:8000/api/ws/stream/${sessionId}`
-);
+**OpenAI**
 
-// Send audio
-navigator.mediaDevices.getUserMedia({ audio: true })
-  .then(stream => {
-    const recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (e) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        ws.send(JSON.stringify({
-          type: "audio_chunk",
-          data: reader.result.split(',')[1],  // base64
-          chunk_number: chunk_num++
-        }));
-      };
-      reader.readAsDataURL(e.data);
-    };
-    recorder.start(200);  // 200ms chunks
-  });
-
-// Receive analysis
-ws.onmessage = (event) => {
-  const message = JSON.parse(event.data);
-  
-  if (message.type === "interrupt") {
-    // Show clarification UI
-    showClarificationDialog(message.questions);
-  }
-};
+```bash
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+OPENAI_API_KEY=sk-...
+```
+```bash
+pip install langchain-openai
 ```
 
-## 📚 Project Structure
+**Anthropic**
+
+```bash
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-6
+ANTHROPIC_API_KEY=...
+```
+```bash
+pip install langchain-anthropic
+```
+
+**Google**
+
+```bash
+LLM_PROVIDER=google
+LLM_MODEL=gemini-2.0-flash
+GOOGLE_API_KEY=...
+```
+```bash
+pip install langchain-google-genai
+```
+
+## API Reference
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/analyze` | Run an analysis pass on text input (optionally with a context PDF). |
+| `POST` | `/api/clarify` | Submit a user response to a HITL clarification question. |
+| `POST` | `/api/transcribe` | Transcribe an audio file via Faster-Whisper. |
+| `POST` | `/api/upload/document` | Upload a PDF/document for context injection. |
+| `POST` | `/api/export` | Export formalized requirements to Jira or Trello. |
+| `GET` | `/api/health` | Health check. |
+| `WS` | `/api/ws/stream/{session_id}` | Live audio streaming + HITL clarification channel. |
+
+Full request/response schemas are available in the auto-generated Swagger UI at `/api/docs`. WebSocket message protocol details are in [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md).
+
+## Project Structure
 
 ```
 RE_tool/
-├── main.py                    # FastAPI app entry
-├── requirements.txt           # Dependencies
-├── .env.example              # Configuration template
-│
-├── config/
-│   ├── __init__.py
-│   └── settings.py           # All configuration
-│
-├── core/
-│   ├── __init__.py
-│   ├── transcriber.py        # Faster-Whisper engine
-│   ├── context_manager.py    # PDF context injection
-│   ├── agents.py             # LangGraph orchestration
-│   ├── formalize.py          # ISO 29148 formatter
-│   └── exporter.py           # Jira/Trello export
-│
-├── services/
-│   ├── __init__.py
-│   ├── stream_service.py     # WebSocket audio streaming
-│   ├── file_service.py       # File upload handler
-│   └── reader_service.py     # Document reader
-│
-├── api/
-│   ├── __init__.py
-│   ├── routes.py             # REST endpoints
-│   └── websocket_handler.py  # WebSocket logic
-│
-├── models/
-│   ├── __init__.py
-│   └── schemas.py            # Pydantic models
-│
-├── utils/
-│   ├── __init__.py
-│   └── logger.py             # Logging setup
-│
-└── data/
-    ├── uploads/              # Temporary file storage
-    └── checkpoints.db        # LangGraph state
+├── main.py                     # FastAPI app entry
+├── requirements.txt            # Backend dependencies
+├── backend/
+│   ├── .env.example            # Configuration template
+│   ├── api/                    # REST routes + WebSocket handler
+│   ├── config/                 # settings.py
+│   ├── core/                   # transcriber, agents, formalizer, exporter
+│   ├── services/               # stream, file upload, document reader
+│   ├── models/                 # Pydantic schemas
+│   ├── utils/                  # logging
+│   └── data/                   # uploads/, checkpoints.db
+├── Web_Frontend/               # React frontend (see its README)
+├── docs/                       # Setup, architecture, testing, project docs
+└── graphify-out/               # Knowledge graph artifacts
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-### "Ollama connection refused"
-```bash
-1. Ensure Ollama is running:
-   $ ollama serve
+**`Ollama connection refused`** — make sure `ollama serve` is running, port `11434` is free, and the configured model is pulled (`ollama list`).
 
-2. Check port 11434:
-   $ netstat -an | findstr 11434
+**`CUDA out of memory`** — reduce `WHISPER_MODEL_SIZE` (e.g. `tiny`), switch `WHISPER_COMPUTE_TYPE` to `float32`, or lower the number of concurrent streams.
 
-3. Verify model loaded:
-   $ ollama list
-```
+**`WebSocket connection refused`** — check CORS in `main.py`, confirm FastAPI is bound to the expected port, and verify firewall/proxy settings.
 
-### "CUDA out of memory"
-```bash
-1. Reduce Whisper model: WHISPER_MODEL_SIZE=tiny
-2. Use float32 instead of float16: WHISPER_COMPUTE_TYPE=float32
-3. Reduce concurrent streams
-```
+## Documentation Index
 
-### "WebSocket connection refused"
-```bash
-1. Check CORS settings in main.py
-2. Verify FastAPI is running on correct port
-3. Check firewall/proxy settings
-```
+| Document | Description |
+| --- | --- |
+| [docs/setup/GETTING_STARTED.md](docs/setup/GETTING_STARTED.md) | Full environment setup walkthrough. |
+| [docs/setup/QUICK_START_NO_DOCKER.md](docs/setup/QUICK_START_NO_DOCKER.md) | Minimal no-Docker quick start. |
+| [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | System architecture deep-dive. |
+| [docs/architecture/ARCHITECTURE_FIX.md](docs/architecture/ARCHITECTURE_FIX.md) | Architecture notes and fixes. |
+| [docs/project/PROJECT_SUMMARY.md](docs/project/PROJECT_SUMMARY.md) | High-level project summary. |
+| [docs/project/IMPLEMENTATION_COMPLETE.md](docs/project/IMPLEMENTATION_COMPLETE.md) | Implementation status. |
+| [docs/project/CODE_AUDIT.md](docs/project/CODE_AUDIT.md) | Code audit report. |
+| [docs/project/PERFORMANCE_AND_ARCH_COMPARISON.md](docs/project/PERFORMANCE_AND_ARCH_COMPARISON.md) | Performance and architecture comparison. |
+| [docs/testing/TESTING_GUIDE.md](docs/testing/TESTING_GUIDE.md) | Full test suite guide. |
+| [docs/testing/TESTING_QUICK_START.md](docs/testing/TESTING_QUICK_START.md) | Quick test reference. |
+| [docs/testing/PROMPT_TESTING.md](docs/testing/PROMPT_TESTING.md) | Prompt-level testing guide. |
+| [Web_Frontend/README.md](Web_Frontend/README.md) | Frontend-specific docs. |
 
-## 📝 Testing
+## License
 
-```bash
-# Health check
-curl http://localhost:8000/api/health
-
-# Static analysis
-python -m pytest tests/
-
-# Transcription test
-curl -X POST http://localhost:8000/api/transcribe \
-  -H "Content-Type: application/json" \
-  -d '{"file_path": "sample.wav", "language": "en"}'
-```
-
-## 🚀 Deployment
-
-### Docker
-```dockerfile
-FROM python:3.10-slim
-
-RUN apt-get update && apt-get install -y cuda-toolkit
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-CMD ["python", "main.py"]
-```
-
-### Production Checklist
-- [ ] Set `DEBUG=False`
-- [ ] Configure CORS for specific origins
-- [ ] Enable Jira/Trello authentication
-- [ ] Set up SSL/TLS
-- [ ] Configure logging aggregation
-- [ ] Set resource limits
-- [ ] Enable request rate limiting
-
-## 📖 References
-
-- [LangGraph Docs](https://python.langchain.com/docs/langgraph)
-- [Faster-Whisper](https://github.com/guillaumekln/faster-whisper)
-- [Ollama](https://ollama.ai)
-- [ISO 29148](https://www.iso.org/standard/72089.html)
-- [FastAPI](https://fastapi.tiangolo.com)
-
-## 📄 License
-
-Proprietary - Requirements Engineering Tool
-
----
-
-**Built with ❤️ for advanced requirements engineering**
+Proprietary — Requirements Engineering Tool.

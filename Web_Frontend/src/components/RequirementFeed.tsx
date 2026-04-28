@@ -109,9 +109,11 @@ export const RequirementFeed: React.FC<RequirementFeedProps> = ({
   // display. Fall back to `completeness` when the backend has not yet
   // populated it so older sessions still render a meaningful value.
   const cumulativeQuality =
-    typeof requirements.quality_score === 'number'
-      ? requirements.quality_score
-      : completeness;
+    typeof requirements.overall_score === 'number'
+      ? requirements.overall_score
+      : typeof requirements.quality_score === 'number'
+        ? requirements.quality_score
+        : completeness;
 
   return (
     <div ref={feedRef} className="space-y-3" style={{ scrollBehavior: 'smooth' }}>
@@ -132,11 +134,13 @@ export const RequirementFeed: React.FC<RequirementFeedProps> = ({
                   : completeness
               }
               quality_score={
-                typeof req.quality_score === 'number'
-                  ? req.quality_score
-                  : typeof req.completeness_score === 'number'
-                    ? req.completeness_score
-                    : cumulativeQuality
+                typeof req.overall_score === 'number'
+                  ? req.overall_score
+                  : typeof req.quality_score === 'number'
+                    ? req.quality_score
+                    : typeof req.completeness_score === 'number'
+                      ? req.completeness_score
+                      : cumulativeQuality
               }
               is_highlighted={false}
               onUpdate={(updated) =>

@@ -17,10 +17,14 @@ export interface ISORequirement {
   completeness_score?: number;
   /**
    * Per-requirement smell-based quality score (0.0-1.0) where 1.0 means no
-   * smells matched this requirement's text and 0.0 is worst. Drives the card
-   * meter — use this in preference to `completeness_score` when present.
+   * smells matched this requirement's text and 0.0 is worst.
    */
   quality_score?: number;
+  /**
+   * Combined score: average of completeness_score and quality_score (0.0-1.0).
+   * Preferred display metric — use this over quality_score when present.
+   */
+  overall_score?: number;
 }
 
 export interface RequirementSmell {
@@ -53,6 +57,8 @@ export interface AnalysisState {
   completeness_score?: number;
   /** Document-level average of per-requirement smell quality scores (0.0-1.0). */
   quality_score?: number;
+  /** Document-level combined score: avg of completeness + quality (0.0-1.0). Preferred display metric. */
+  overall_score?: number;
   ready_for_export?: boolean;
 }
 
@@ -62,6 +68,8 @@ export interface FormalizedRequirement {
   completeness_score: number;
   /** Document-level average of per-requirement smell quality scores (0.0-1.0). */
   quality_score?: number;
+  /** Document-level combined score: avg of completeness + quality (0.0-1.0). Preferred display metric. */
+  overall_score?: number;
   iso_requirements?: ISORequirement[];
   requirements?: ISORequirement[];
   first_requirement?: ISORequirement | null;

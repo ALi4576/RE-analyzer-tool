@@ -112,7 +112,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
             // Smell-based quality score — primary metric for card/footer
             // meters. Fall back to completeness for backends that have
             // not yet been upgraded.
-            quality_score: result.quality_score ?? result.completeness_score ?? 0,
+            quality_score: result.overall_score ?? result.quality_score ?? result.completeness_score ?? 0,
             ready_for_export: result.ready_for_export ?? false,
           },
         });
@@ -222,7 +222,7 @@ export const useRequirementStore = create<RequirementStore>((set, get) => ({
             iso_requirements: result.iso_requirements,
             total_requirements: result.total_requirements ?? result.iso_requirements.length,
             completeness_score: result.completeness_score ?? 0,
-            quality_score: result.quality_score ?? result.completeness_score ?? 0,
+            quality_score: result.overall_score ?? result.quality_score ?? result.completeness_score ?? 0,
             ready_for_export: result.ready_for_export ?? false,
           },
         });
@@ -426,13 +426,14 @@ export function setupWebSocketListeners() {
     const requirements_list = message.requirements_list || [];
     const requirements_count = message.requirements_count || 0;
     const completeness_score = message.completeness_score || 0;
-    // Smell-based quality — primary metric for the feed footer. Fall back
-    // to completeness so older backends (or the transitional deploy window)
-    // still render a meaningful value.
+    // overall_score (completeness + quality avg) is the preferred display metric.
+    // Fall back through quality_score → completeness for older backends.
     const quality_score =
-      typeof message.quality_score === 'number'
-        ? message.quality_score
-        : completeness_score;
+      typeof message.overall_score === 'number'
+        ? message.overall_score
+        : typeof message.quality_score === 'number'
+          ? message.quality_score
+          : completeness_score;
 
     console.log(`[Scribe Mode] Received ${requirements_count} requirements with completeness ${completeness_score.toFixed(2)}, quality ${quality_score.toFixed(2)}`);
     console.log('Store received analysis_update:', message);
@@ -467,9 +468,11 @@ export function setupWebSocketListeners() {
     const requirements_count = message.requirements_count || 0;
     const completeness_score = message.completeness_score || 0;
     const quality_score =
-      typeof message.quality_score === 'number'
-        ? message.quality_score
-        : completeness_score;
+      typeof message.overall_score === 'number'
+        ? message.overall_score
+        : typeof message.quality_score === 'number'
+          ? message.quality_score
+          : completeness_score;
 
     console.log(`[Scribe Mode] Clarification processed - ${requirements_count} requirements updated`);
     console.log('Store received clarification_processed:', message);

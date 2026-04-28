@@ -3,7 +3,7 @@ Multi-Agent Orchestration using LangGraph.
 Implements the "Squad" logic with Human-in-the-Loop pattern for requirements analysis.
 """
 import asyncio
-from typing import Dict, Any, List, TypedDict, Literal
+from typing import Dict, Any, List, Optional, TypedDict, Literal
 from langchain_ollama import OllamaLLM
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -23,6 +23,121 @@ from utils import get_logger
 logger = get_logger("agent")
 
 
+# ============ LLM Factory ============
+def _build_llm(
+    provider: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool = True,
+):
+    """Construct a LangChain LLM/ChatModel for the given provider.
+
+    Lazy-imports provider packages so a missing optional dependency only
+    raises when that provider is actually selected. Raises ValueError early
+    (at agent init) if a cloud provider is selected without its API key.
+
+    Args:
+        provider: One of "ollama", "openai", "anthropic", "gemini".
+        model:    Provider-specific model identifier (e.g. "llama3",
+                  "gpt-4o-mini", "claude-3-5-sonnet-latest", "gemini-1.5-pro").
+        temperature: Sampling temperature.
+        max_tokens:  Upper bound on generated tokens.
+        json_mode:   Request a JSON-object response when supported by the
+                     provider. Anthropic does not expose this knob, so it is
+                     silently ignored there.
+
+    Returns:
+        A LangChain Runnable supporting `.invoke(prompt) -> str | message`.
+    """
+    provider = (provider or "ollama").lower().strip()
+
+    if provider == "ollama":
+        kwargs: Dict[str, Any] = {
+            "base_url": settings.OLLAMA_BASE_URL,
+            "model": model or settings.OLLAMA_MODEL,
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        }
+        if json_mode:
+            kwargs["format"] = "json"
+        return OllamaLLM(**kwargs)
+
+    if provider == "openai":
+        if not settings.OPENAI_API_KEY:
+            raise ValueError(
+                "LLM provider 'openai' selected but OPENAI_API_KEY is not set."
+            )
+        from langchain_openai import ChatOpenAI  # lazy import
+
+        kwargs = {
+            "model": model or "gpt-4o-mini",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "api_key": settings.OPENAI_API_KEY,
+        }
+        if settings.OPENAI_API_BASE:
+            kwargs["base_url"] = settings.OPENAI_API_BASE
+        if json_mode:
+            kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
+        return ChatOpenAI(**kwargs)
+
+    if provider == "anthropic":
+        if not settings.ANTHROPIC_API_KEY:
+            raise ValueError(
+                "LLM provider 'anthropic' selected but ANTHROPIC_API_KEY is not set."
+            )
+        from langchain_anthropic import ChatAnthropic  # lazy import
+
+        # Anthropic does not expose response_format=json_object; rely on
+        # prompt-level JSON instructions (already used throughout the agent).
+        return ChatAnthropic(
+            model=model or "claude-3-5-sonnet-latest",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=settings.ANTHROPIC_API_KEY,
+        )
+
+    if provider == "gemini":
+        if not settings.GOOGLE_API_KEY:
+            raise ValueError(
+                "LLM provider 'gemini' selected but GOOGLE_API_KEY is not set."
+            )
+        from langchain_google_genai import ChatGoogleGenerativeAI  # lazy import
+
+        kwargs = {
+            "model": model or "gemini-1.5-pro",
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "google_api_key": settings.GOOGLE_API_KEY,
+        }
+        if json_mode:
+            # google-genai accepts MIME-type response shaping
+            kwargs["response_mime_type"] = "application/json"
+        return ChatGoogleGenerativeAI(**kwargs)
+
+    raise ValueError(
+        f"Unsupported LLM provider '{provider}'. "
+        f"Expected one of: {settings.SUPPORTED_LLM_PROVIDERS}."
+    )
+
+
+def _resolve_role(role_provider: str, role_model: str) -> tuple[str, str]:
+    """Resolve a per-role (provider, model) pair with fallback rules.
+
+    - Empty role_provider inherits the main LLM_PROVIDER.
+    - When the resolved provider is 'ollama' and role_model is empty,
+      fall back to OLLAMA_MODEL for backward compatibility.
+    - For non-ollama providers, an empty role_model lets the factory pick
+      a sensible default (see _build_llm).
+    """
+    provider = (role_provider or settings.LLM_PROVIDER or "ollama").lower()
+    model = role_model or ""
+    if provider == "ollama" and not model:
+        model = settings.OLLAMA_MODEL
+    return provider, model
+
+
 # ============ LangGraph State Schema ============
 class AgentState(TypedDict, total=False):
     """LangGraph state schema for requirement analysis workflow."""
@@ -40,6 +155,10 @@ class AgentState(TypedDict, total=False):
     interrupt_needed: bool
     formalized: Dict[str, Any]
     user_clarifications: Dict[str, str]
+    # Counter for iterative clarification rounds. Starts at 0; incremented each
+    # time _generate_questions_node emits a fresh batch of questions. Capped by
+    # settings.MAX_CLARIFICATION_ROUNDS to prevent infinite loops.
+    clarification_round: int
 
 
 class RequirementsAnalysisAgent:
@@ -56,31 +175,57 @@ class RequirementsAnalysisAgent:
     
     def __init__(self):
         """Initialize agent squad with LangGraph."""
-        # Fast model for quality analysis (smell detection + gap scoring).
-        # Defaults to the main model; set OLLAMA_ANALYSIS_MODEL=phi3:mini etc. for speed.
-        analysis_model = settings.OLLAMA_ANALYSIS_MODEL or settings.OLLAMA_MODEL
-        self.analysis_llm = OllamaLLM(
-            base_url=settings.OLLAMA_BASE_URL,
+        # ---- Analysis LLM (smell detection + gap scoring) ----
+        # Provider falls back to LLM_PROVIDER, which defaults to 'ollama'.
+        # When running on ollama, the model falls back through:
+        #   ANALYSIS_LLM_MODEL -> OLLAMA_ANALYSIS_MODEL -> OLLAMA_MODEL.
+        analysis_provider, analysis_model = _resolve_role(
+            settings.ANALYSIS_LLM_PROVIDER,
+            settings.ANALYSIS_LLM_MODEL or (
+                settings.OLLAMA_ANALYSIS_MODEL if (settings.ANALYSIS_LLM_PROVIDER or settings.LLM_PROVIDER) == "ollama" else ""
+            ),
+        )
+        self.analysis_llm = _build_llm(
+            provider=analysis_provider,
             model=analysis_model,
-            temperature=0.1,
-            format="json",
-            num_predict=512,   # smell+gap JSON is small; cap prevents runaway generation
+            temperature=settings.OLLAMA_ANALYSIS_TEMPERATURE,
+            max_tokens=settings.OLLAMA_ANALYSIS_NUM_PREDICT,
+            json_mode=True,
         )
-        # Main LLM for question generation
-        self.llm = OllamaLLM(
-            base_url=settings.OLLAMA_BASE_URL,
-            model=settings.OLLAMA_MODEL,
+
+        # ---- Main LLM (clarification question generation) ----
+        main_provider, main_model = _resolve_role(
+            settings.LLM_PROVIDER,
+            settings.LLM_MODEL or (settings.OLLAMA_MODEL if settings.LLM_PROVIDER == "ollama" else ""),
+        )
+        self.llm = _build_llm(
+            provider=main_provider,
+            model=main_model,
             temperature=settings.OLLAMA_TEMPERATURE,
-            format="json",
-            num_predict=512,
+            max_tokens=settings.OLLAMA_NUM_PREDICT,
+            json_mode=True,
         )
-        # Low-temperature LLM for ISO 29148 formalization
-        self.formalize_llm = OllamaLLM(
-            base_url=settings.OLLAMA_BASE_URL,
-            model=settings.OLLAMA_MODEL,
+
+        # ---- Formalize LLM (ISO 29148 atomization) ----
+        formalize_provider, formalize_model = _resolve_role(
+            settings.FORMALIZE_LLM_PROVIDER,
+            settings.FORMALIZE_LLM_MODEL or (
+                settings.OLLAMA_FORMALIZE_MODEL if (settings.FORMALIZE_LLM_PROVIDER or settings.LLM_PROVIDER) == "ollama" else ""
+            ),
+        )
+        self.formalize_llm = _build_llm(
+            provider=formalize_provider,
+            model=formalize_model,
             temperature=settings.OLLAMA_FORMALIZE_TEMPERATURE,
-            format="json",
-            num_predict=2048,  # formalization can produce many requirements
+            max_tokens=settings.OLLAMA_FORMALIZE_NUM_PREDICT,
+            json_mode=True,
+        )
+
+        logger.info(
+            "LLM providers — main=%s/%s, analysis=%s/%s, formalize=%s/%s",
+            main_provider, main_model or "<default>",
+            analysis_provider, analysis_model or "<default>",
+            formalize_provider, formalize_model or "<default>",
         )
         
         # Initialize state persister
@@ -240,6 +385,9 @@ class RequirementsAnalysisAgent:
                 "interrupt_needed": False,
                 "user_clarifications": merged_clarifications,
                 "clarification_questions": prior_questions,
+                # Carry over the round counter so the iterative clarification
+                # loop (Bug 3) can decide whether to ask another batch.
+                "clarification_round": existing.values.get("clarification_round", 0),
             }
 
             # Re-run pipeline in a thread (now formalizer will see user_clarifications)
@@ -283,7 +431,45 @@ class RequirementsAnalysisAgent:
             raise
     
     # ---- Workflow Nodes ----
-    
+
+    def _should_regenerate_questions(self, state: Dict[str, Any]) -> bool:
+        """
+        Decide whether to regenerate fresh clarification questions on a resume run.
+
+        Returns True when ALL prior questions have been answered AND overall
+        quality is still below the target — meaning we need a *new*, deeper
+        round of questions (Bug 3 — iterative clarification). Returns False
+        when prior questions are not yet fully answered (preserve & resume) or
+        when overall quality already meets target.
+        """
+        existing_questions = state.get("clarification_questions") or []
+        user_clarifications = state.get("user_clarifications") or {}
+        if not existing_questions or not user_clarifications:
+            return False
+
+        prior_ids = {
+            q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
+            for q in existing_questions
+        }
+        answered_ids = {qid for qid, ans in user_clarifications.items() if ans}
+        all_answered = bool(prior_ids) and prior_ids.issubset(answered_ids)
+        if not all_answered:
+            return False
+
+        # All prior answered: regenerate only if quality still below target and
+        # we have rounds left.
+        formalized = state.get("formalized")
+        overall = (
+            formalized.get("overall_score", 0.0)
+            if isinstance(formalized, dict)
+            else 0.0
+        )
+        current_round = state.get("clarification_round", 0)
+        return (
+            overall < settings.QUALITY_TARGET_SCORE
+            and current_round < settings.MAX_CLARIFICATION_ROUNDS
+        )
+
     def _ensure_dict(self, state: Any) -> Dict[str, Any]:
         """Convert state to dict if it's a Pydantic model."""
         if isinstance(state, dict):
@@ -468,10 +654,15 @@ JSON array:"""
         Determine if workflow should interrupt for human clarification.
 
         Triggers when smell score OR logical gap score exceeds its threshold.
-        Skips the interrupt entirely on resume runs where the user has already
-        answered the clarification questions from the prior interrupted pass —
-        otherwise the pipeline would loop, re-asking the user the same questions
-        every time smell/gap stays above threshold.
+
+        Iteration policy (Bug 3 fix):
+        - On the first pass we always interrupt when quality is poor.
+        - On a resume pass (user has answered prior questions), we re-evaluate:
+            * If we have already hit MAX_CLARIFICATION_ROUNDS → stop, force export.
+            * If overall_score >= QUALITY_TARGET_SCORE → quality target reached,
+              stop interrupting.
+            * Otherwise → quality is still poor; allow another interrupt round
+              with fresh, more-targeted questions.
         """
         smell_score = state.get("smell_score", 0.0)
         logical_gap_score = state.get("logical_gap_score", 0.0)
@@ -480,26 +671,61 @@ JSON array:"""
         gap_trigger = logical_gap_score >= settings.LOGICAL_GAP_THRESHOLD
         should_interrupt = smell_trigger or gap_trigger
 
-        # Break the re-interrupt loop: if the user has already answered the prior
-        # clarification questions, do not interrupt again for this pass.
         user_clarifications = state.get("user_clarifications") or {}
         prior_questions = state.get("clarification_questions") or []
         if should_interrupt and user_clarifications and prior_questions:
-            prior_ids = {
-                q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
-                for q in prior_questions
-            }
-            answered_ids = {qid for qid, ans in user_clarifications.items() if ans}
-            if prior_ids and prior_ids.issubset(answered_ids):
+            current_round = state.get("clarification_round", 0)
+            if current_round >= settings.MAX_CLARIFICATION_ROUNDS:
                 logger.info(
-                    "Suppressing interrupt: all prior clarification questions have been answered."
+                    f"Max clarification rounds ({settings.MAX_CLARIFICATION_ROUNDS}) "
+                    f"reached — forcing export despite low quality."
                 )
                 should_interrupt = False
+            else:
+                formalized = state.get("formalized")
+                overall = (
+                    formalized.get("overall_score", 0.0)
+                    if isinstance(formalized, dict)
+                    else 0.0
+                )
+                if overall >= settings.QUALITY_TARGET_SCORE:
+                    logger.info(
+                        f"Quality target reached ({overall:.2f} >= "
+                        f"{settings.QUALITY_TARGET_SCORE}) — no further interrupt."
+                    )
+                    should_interrupt = False
+                else:
+                    # Still poor quality. Only re-interrupt once the user has
+                    # actually finished answering the prior batch — otherwise
+                    # mid-flight resume calls would prematurely re-ask.
+                    prior_ids = {
+                        q.get("question_id") if isinstance(q, dict)
+                        else getattr(q, "question_id", None)
+                        for q in prior_questions
+                    }
+                    answered_ids = {
+                        qid for qid, ans in user_clarifications.items() if ans
+                    }
+                    if prior_ids and prior_ids.issubset(answered_ids):
+                        logger.info(
+                            f"Quality still low ({overall:.2f}) after round "
+                            f"{current_round} — allowing re-interrupt with fresh "
+                            f"questions."
+                        )
+                        # Leave should_interrupt True so a fresh question batch fires.
+                    else:
+                        # User hasn't finished answering — suppress to avoid
+                        # double-prompting mid-flight.
+                        logger.info(
+                            "Suppressing interrupt: prior clarification questions "
+                            "not yet fully answered."
+                        )
+                        should_interrupt = False
 
         logger.info(
             f"Interrupt check: smell={smell_score:.2f}(>={settings.SMELL_SCORE_THRESHOLD}={smell_trigger}), "
             f"gap={logical_gap_score:.2f}(>={settings.LOGICAL_GAP_THRESHOLD}={gap_trigger}), "
-            f"interrupt={should_interrupt}"
+            f"round={state.get('clarification_round', 0)}, interrupt={should_interrupt}"
         )
         return should_interrupt
     
@@ -574,27 +800,92 @@ gap_score: X.XX"""
             q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
             for q in existing_questions
         }
-        if existing_questions and answered_ids & existing_ids:
+        if existing_questions and answered_ids & existing_ids and not self._should_regenerate_questions(state):
             logger.info(
                 f"Preserving {len(existing_questions)} existing clarification questions "
                 f"(user has answered {len(answered_ids & existing_ids)} of them)"
             )
             questions = existing_questions
         else:
-            questions_prompt = f"""
-Based on these requirement quality issues, generate focused clarification questions:
+            # Format smells as readable bullet points (severity + type + location +
+            # recommendation). Pass ALL smells so severe ones at index 3+ are not
+            # silently dropped (Bug 1 fix).
+            def _smell_bullet(s: Any) -> str:
+                if isinstance(s, dict):
+                    stype = s.get("smell_type") or s.get("type") or "quality_issue"
+                    loc = s.get("location") or "(unspecified)"
+                    sev = s.get("severity", 0.0)
+                    rec = s.get("recommendation") or s.get("description") or ""
+                else:
+                    stype = getattr(s, "smell_type", None) or getattr(s, "type", None) or "quality_issue"
+                    loc = getattr(s, "location", None) or "(unspecified)"
+                    sev = getattr(s, "severity", 0.0)
+                    rec = getattr(s, "recommendation", None) or getattr(s, "description", "") or ""
+                # Normalize enum objects and "ClassName.VALUE" strings to plain value
+                if hasattr(stype, "value"):
+                    stype = stype.value
+                elif isinstance(stype, str) and "." in stype:
+                    stype = stype.split(".")[-1].lower()
+                try:
+                    sev_f = float(sev)
+                except (TypeError, ValueError):
+                    sev_f = 0.0
+                return f"- [severity={sev_f:.2f}] requirement not clear at \"{loc}\" — {rec}".strip()
 
-Issues found:
-{str(smells[:3])}
+            smell_bullets = "\n".join(_smell_bullet(s) for s in (smells or []))
+            if not smell_bullets:
+                smell_bullets = "(no specific smells detected — focus on completeness, measurability, and unambiguous wording)"
 
-Input: {input_text}
+            # On round 2+ include a summary of what was already asked/answered
+            # so the LLM avoids repeating itself and digs deeper.
+            current_round = state.get("clarification_round", 0)
+            prior_qa_block = ""
+            if current_round >= 1 and existing_questions:
+                lines = []
+                for q in existing_questions:
+                    qid = q.get("question_id") if isinstance(q, dict) else getattr(q, "question_id", None)
+                    qtext = q.get("question") if isinstance(q, dict) else getattr(q, "question", "")
+                    ans = user_clarifications.get(qid, "(no answer)") if qid else "(no answer)"
+                    lines.append(f"- Q: {qtext}\n  A: {ans}")
+                prior_qa_block = (
+                    "\n\nPrevious clarification round (DO NOT repeat these questions; ask DIFFERENT, "
+                    "deeper questions that build on the answers below):\n" + "\n".join(lines)
+                )
 
-Generate 2-3 specific questions to clarify ambiguities.
-Format as JSON: [{{\"question_id\": \"q1\", \"question\": \"...\", \"context\": \"...\", \"required_clarity\": [\"...\"]}}]
+            questions_prompt = f"""You are a senior requirements engineer (ISO/IEC/IEEE 29148). Your job is to ask clarification questions that turn a vague requirement into a TESTABLE one.
+
+A good clarification question:
+- Targets ONE specific quality defect from the issues list below.
+- Asks WHO (actor/role), WHAT (precise behaviour or output), WHEN (trigger/condition), or HOW MUCH (numeric threshold, units, tolerance).
+- Is concrete and answerable — e.g. "What is the maximum acceptable response time in milliseconds under peak load?" NOT "Can you clarify performance?"
+- Forces the user to commit to a measurable acceptance criterion.
+
+Original input requirement text:
+\"\"\"
+{input_text}
+\"\"\"
+
+Identified quality issues (each one is a defect to address with at least one question, ordered by severity high→low):
+{smell_bullets}{prior_qa_block}
+
+Produce 3-5 questions, ordered by severity (most critical first). Each question MUST clearly map to one of the issues above. Avoid generic questions; if you cannot tie a question to a specific issue, omit it.
+
+Respond with ONLY valid JSON in exactly this schema (no prose, no markdown fences):
+[
+  {{"question_id": "q1", "question": "<the concrete question>", "context": "<which smell/defect this targets and why it matters>", "required_clarity": ["<measurable attribute 1>", "<measurable attribute 2>"]}}
+]
 """
 
             questions_response = self.llm.invoke(questions_prompt)
             questions = self._parse_questions_response(questions_response)
+
+            # Bump the round counter only when we actually emit a fresh batch of
+            # questions (Bug 3). Preserving the prior batch is not a new round.
+            state["clarification_round"] = state.get("clarification_round", 0) + 1
+            logger.info(
+                f"Clarification round bumped to {state['clarification_round']} "
+                f"(max={settings.MAX_CLARIFICATION_ROUNDS})"
+            )
 
             # Fallback: if the LLM produced no parseable questions but we still need an
             # interrupt, emit a generic question so the interrupt is actionable and the
@@ -656,7 +947,16 @@ Format as JSON: [{{\"question_id\": \"q1\", \"question\": \"...\", \"context\": 
                 f"Q: {_qfield(q, 'question')}\nA: {user_clarifs.get(_qfield(q, 'question_id', ''), '')}"
                 for q in clarification_questions
             ])
-        
+
+        # Pre-count distinct features so we can give the LLM an explicit target.
+        # Weak local models ignore generic "split if needed" instructions but reliably
+        # comply when told the exact expected array length.
+        feature_bullets, feature_count = self._extract_feature_list(input_text)
+        feature_hint = (
+            f"\nIDENTIFIED FEATURES ({feature_count} distinct):\n{feature_bullets}\n"
+            f"Your output JSON array MUST contain exactly {feature_count} requirement object(s) — one per feature above.\n"
+        )
+
         # Enhanced ISO 29148 formatting prompt
         context_header = "CONTEXT DOCUMENTS:\n" if context_text else ""
         clarifications_header = "CLARIFICATIONS PROVIDED:\n" if clarifications_text else ""
@@ -676,11 +976,12 @@ You are an ISO 29148 requirements specialist. Convert the following requirement 
 ORIGINAL REQUIREMENT:
 {input_text}
 
+{feature_hint}
 {context_header}{context_text if context_text else ''}
 
 {clarifications_header}{clarifications_text if clarifications_text else ''}
 
-TASK: If the input contains multiple requirements, requests, or features (including compound or multi-part sentences), split them into separate ISO 29148 compliant requirements. Each distinct user need or feature should become its own requirement in the output array.
+TASK: The input above contains {feature_count} distinct feature(s) listed above. Split them into {feature_count} separate ISO 29148 compliant requirements. Each distinct user need or feature MUST become its own requirement in the output array.
 
 ISO 29148 REQUIREMENTS:
 1. Each requirement MUST use imperative "shall" language
@@ -689,7 +990,7 @@ ISO 29148 REQUIREMENTS:
 4. Prioritize based on business impact
 5. Categorize as Functional/Non-functional/Interface
 
-OUTPUT FORMAT (JSON array):
+OUTPUT FORMAT (JSON array with exactly {feature_count} items):
 [
     {{
         "title": "Clear, concise title (< 80 chars)",
@@ -746,10 +1047,29 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
             quality_score = self._attach_per_requirement_quality(
                 valid_requirements, state.get("smells", []) or []
             )
+
+            # Combined per-requirement score (Bug 2 fix): the frontend should
+            # display ONE score per card that reflects both completeness (ISO
+            # field coverage) and quality (smell-derived defects). Showing
+            # quality_score alone produced the misleading "100% per card vs 20%
+            # total" contradiction.
+            overall_total = 0.0
+            for req in valid_requirements:
+                comp = float(req.get("completeness_score", 0.0) or 0.0)
+                qual = float(req.get("quality_score", 0.0) or 0.0)
+                req["overall_score"] = round((comp + qual) / 2.0, 4)
+                overall_total += req["overall_score"]
+            overall_score = (
+                round(overall_total / len(valid_requirements), 4)
+                if valid_requirements
+                else 0.0
+            )
+
             state["formalized"] = {
                 "total_requirements": len(valid_requirements),
                 "completeness_score": completeness_score,
                 "quality_score": quality_score,
+                "overall_score": overall_score,
                 # Only export-ready when there are requirements AND no pending interrupt
                 "ready_for_export": bool(valid_requirements) and not interrupt_needed,
             }
@@ -1010,7 +1330,58 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                 logger.warning(f"Skipping non-dict item in requirements: {type(req)}")
         
         return valid_reqs
-    
+
+    def _extract_feature_list(self, text: str) -> tuple[list[str], int]:
+        """
+        Split raw stakeholder text into a list of distinct feature phrases.
+
+        Uses conjunction/separator heuristics so the formalize prompt can tell
+        the LLM exactly how many JSON array items to produce — the single most
+        effective technique for getting weak local models to generate multiple
+        requirements instead of collapsing everything into one.
+
+        Returns (bullet_lines_str, count) where bullet_lines_str is a
+        newline-joined numbered list ready to embed in a prompt.
+        """
+        import re
+
+        # Sentence-level separators that almost always signal a new feature:
+        #   "and I also want", "plus", "I also need", "additionally", "as well as",
+        #   "furthermore", "moreover", "also", sentence boundary before "I want/need".
+        # We split on these, then re-join fragments that are too short (< 6 words)
+        # with the previous fragment to avoid over-splitting "A and B" short phrases.
+        SEP = re.compile(
+            r"""
+            (?:,?\s+and\s+(?:I\s+(?:also\s+)?(?:want|need|would\s+like)\s+(?:them?\s+to\s+be\s+able\s+to\s+)?))|  # "and I (also) want/need"
+            (?:,\s*plus\b)|                    # ", plus"
+            (?:\.\s+(?=[A-Z]))|                # sentence boundary
+            (?:;\s*)|                           # semicolons
+            (?:\s+additionally[,\s]+)|          # "additionally"
+            (?:\s+furthermore[,\s]+)|           # "furthermore"
+            (?:\s+moreover[,\s]+)|              # "moreover"
+            (?:\s+as\s+well\s+as\s+)           # "as well as"
+            """,
+            re.VERBOSE | re.IGNORECASE,
+        )
+
+        fragments = [f.strip() for f in SEP.split(text) if f and f.strip()]
+
+        # Merge very-short fragments (< 5 words) back onto the previous one —
+        # they're usually continuations, not new requirements.
+        merged: list[str] = []
+        for frag in fragments:
+            if merged and len(frag.split()) < 5:
+                merged[-1] = merged[-1].rstrip(" .,") + ", " + frag
+            else:
+                merged.append(frag)
+
+        # Always have at least 1 feature
+        if not merged:
+            merged = [text.strip()]
+
+        bullets = "\n".join(f"{i+1}. {f}" for i, f in enumerate(merged))
+        return bullets, len(merged)
+
     def _calculate_requirements_completeness(self, requirements: List[Dict[str, Any]]) -> float:
         """
         Calculate completeness score for formalized requirements.
@@ -1098,9 +1469,15 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                 continue
             normalized_smells.append({"tokens": _tokens(loc), "severity": sev})
 
-        OVERLAP_THRESHOLD = 0.4  # fraction of smell tokens that must appear in req text
+        # Lowered from 0.4 → 0.2 (Bug 2): formalization rewrites wording, so
+        # demanding 40% token overlap meant most smells failed to match any
+        # requirement, leaving every quality_score at 1.0 even when the input
+        # was riddled with smells.
+        OVERLAP_THRESHOLD = 0.2
 
-        total_quality = 0.0
+        # First pass: compute per-req matched severity sum.
+        per_req_match: List[float] = []
+        global_matched_total = 0.0
         for req in requirements:
             shall = (req.get("shall_statement") or "").lower()
             title = (req.get("title") or "").lower()
@@ -1114,8 +1491,27 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
                 overlap = len(smell_tokens & req_tokens) / len(smell_tokens)
                 if overlap >= OVERLAP_THRESHOLD:
                     matched_severity_sum += ns["severity"]
+            per_req_match.append(matched_severity_sum)
+            global_matched_total += matched_severity_sum
 
-            per_req_smell_score = min(1.0, matched_severity_sum)
+        # Fallback distribution (Bug 2): if smells exist but NO requirement
+        # matched any of them, the document still has known defects — penalize
+        # all requirements by the average smell severity rather than leaving
+        # every quality_score at 1.0.
+        fallback_penalty = 0.0
+        if normalized_smells and global_matched_total == 0.0:
+            avg_severity = sum(ns["severity"] for ns in normalized_smells) / len(normalized_smells)
+            fallback_penalty = avg_severity
+            logger.info(
+                f"Smell match fallback engaged: {len(normalized_smells)} smells but no "
+                f"req matched. Distributing avg severity {avg_severity:.3f} across all "
+                f"{len(requirements)} requirements."
+            )
+
+        total_quality = 0.0
+        for req, matched_severity_sum in zip(requirements, per_req_match):
+            effective = matched_severity_sum if matched_severity_sum > 0.0 else fallback_penalty
+            per_req_smell_score = min(1.0, effective)
             quality_score = round(1.0 - per_req_smell_score, 4)
             # Clamp defensively — round of a negative could still slip in edge cases
             if quality_score < 0.0:
@@ -1128,7 +1524,8 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
         average_quality = total_quality / len(requirements)
         logger.info(
             f"Per-requirement quality attached. avg_quality={average_quality:.3f} "
-            f"across {len(requirements)} reqs (matched against {len(normalized_smells)} smells)"
+            f"across {len(requirements)} reqs (matched against {len(normalized_smells)} smells, "
+            f"fallback_penalty={fallback_penalty:.3f})"
         )
         return average_quality
 
