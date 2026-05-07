@@ -550,14 +550,19 @@ severity: 0.0 = minor, 1.0 = critical
 gap_score: 0.0 = fully specified and implementable, 1.0 = completely vague
 smells: use [] if the text is clear, specific, and well-specified"""
 
-        response = self.analysis_llm.invoke(quality_prompt)
+        try:
+            response = self.analysis_llm.invoke(quality_prompt)
+        except Exception as e:
+            logger.warning(f"Quality analysis LLM invoke failed ({type(e).__name__}: {e}); using fallback scores")
+            response = '{"smells":[{"type":"ambiguous","severity":0.8,"location":"","recommendation":"Requirement needs clarification"}],"gap_score":0.7}'
         logger.info(f"Quality analysis raw response: {str(response)[:200]}")
 
         smells: List[RequirementSmellAnalysis] = []
         gap_score = 0.5
 
         try:
-            parsed = _json.loads(response) if isinstance(response, str) else response
+            raw = response.content if hasattr(response, "content") else response
+            parsed = _json.loads(raw) if isinstance(raw, str) else raw
             raw_smells = parsed.get("smells", [])
             gap_score = float(parsed.get("gap_score", 0.5))
 
@@ -631,6 +636,8 @@ RULES:
 JSON array:"""
 
         smells_response = self.llm.invoke(smell_prompt)
+        if hasattr(smells_response, "content"):
+            smells_response = smells_response.content
 
         if not smells_response:
             logger.error("Ollama returned empty response for smells")
@@ -876,7 +883,13 @@ Respond with ONLY valid JSON in exactly this schema (no prose, no markdown fence
 ]
 """
 
-            questions_response = self.llm.invoke(questions_prompt)
+            try:
+                questions_response = self.llm.invoke(questions_prompt)
+            except Exception as e:
+                logger.warning(f"Question generation LLM invoke failed ({type(e).__name__}: {e}); using empty fallback")
+                questions_response = "[]"
+            if hasattr(questions_response, "content"):
+                questions_response = questions_response.content
             questions = self._parse_questions_response(questions_response)
 
             # Bump the round counter only when we actually emit a fresh batch of
@@ -1012,8 +1025,10 @@ OUTPUT ONLY VALID JSON, NO MARKDOWN OR EXPLANATIONS.
         
         try:
             formalize_response = self.formalize_llm.invoke(formalize_prompt)
+            if hasattr(formalize_response, "content"):
+                formalize_response = formalize_response.content
             logger.info(f"LLM formalization response: {formalize_response}")
-            
+
             # Parse JSON response
             iso_requirements = self._parse_formalize_response(formalize_response)
             

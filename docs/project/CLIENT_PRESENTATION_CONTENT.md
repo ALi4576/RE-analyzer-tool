@@ -9,27 +9,203 @@
 
 ---
 
-## Slide 1 — What We Set Out to Build
+## Slide 1 — Introduction
 
-**Headline:** Stop writing requirements documents. Feed in whatever you already have — typed notes, a meeting recording, a PDF charter, or live speech — and get ISO 29148 output.
+**Headline 1:** Requirements Engineering and Test Driven devolpment SoSe26.
+**Headline 2:** Multi-Agentic AI Teams.
+**Subtitle 1:** Submitted to Professor Henning Femmer
+**Subtitle 2:** Presented by Ali Asad
+---
 
-Writing software requirements is one of the most error-prone parts of any project. Business analysts and product managers spend hours translating raw inputs — meeting notes, audio recordings, stakeholder emails, legacy specifications — into structured documents. And even then, requirements often come out vague, incomplete, or inconsistent. Sentinel-RE was built to solve exactly this problem. The core idea is that **requirements engineering should be input-agnostic**: whatever form the raw material comes in, the system accepts it, analyses it, and formats it into professionally structured requirements without manual re-writing.
+## Slide 2 — Structure of Presentation (Table of contents)
+1. Problem Statement / task
+2. RE Methedology(Multi-Agentic AI Teams) brief introduction
+3. Existing methods and their comparision
+4. Current approach
+5. Problems and limitations
+6. Output and Results(SRS)
+7. References
+8. Discussion
+---
 
-The system accepts four input modes, all of which produce the same structured output:
+## Slide 3 — Problem Statement / task
+**Headline:** The core idea is to generate a tool that does our requirements documentation process for us. The tool has access to our backlog and is able to show us what is missing, ask the right questions and execute all the changes for us.
+
+**Headline:** Stop writing requirements documents. Feed in whatever you already have — typed notes, a meeting recording, a PDF charter, or live speech — and get a professional industry level output.
+
+Writing software requirements is one of the most error-prone parts of any project. Business analysts and product managers spend hours translating raw inputs — meeting notes, audio recordings, stakeholder emails, legacy specifications — into structured documents. And even then, requirements often come out vague, incomplete, or inconsistent. This project is being built to solve exactly this problem. The core idea is that **requirements engineering should be input-agnostic**: whatever form the raw material comes in, the system accepts it, analyses it, and formats it into professionally structured requirements without manual re-writing.
+
+We assume that the system accepts four input modes, all of which produce the same structured output:
 - **Typed or pasted text** — the primary input in the UI. A user can type a rough requirement, paste a chunk of meeting notes, or drop in content from an email thread. Analysis fires incrementally as text is entered.
 - **Uploaded audio files** — pre-recorded interviews, workshop recordings, or voice memos (.mp3, .wav, .m4a, .ogg, .flac) are transcribed and analysed.
 - **Live voice capture** — the user can speak into a microphone and have their words transcribed in real time. This is one input path among several, not the primary use case.
 - **Uploaded documents (PDF / TXT)** — existing project charters, specifications, or scope documents are parsed and used either as the source material or as ground-truth context that every new requirement is cross-checked against.
 
-Whichever input is used, the downstream pipeline is identical. The tool follows the **ISO 29148 standard**, an internationally recognised framework for writing software requirements. Every requirement it produces has a unique ID, a formal "shall" statement, a business rationale, measurable acceptance criteria, a priority level, and a category. This is the same structure large engineering organisations use for documentation.
+Whichever input is used, the downstream pipeline is identical. 
+<!-- The tool follows the **ISO 29148 standard**, an internationally recognised framework for writing software requirements. Every requirement it produces has a unique ID, a formal "shall" statement, a business rationale, measurable acceptance criteria, a priority level, and a category. -->
 
-Beyond formatting, Sentinel-RE also acts as a quality gate. It detects seven specific types of requirement problems — vague language, missing measurements, internal contradictions, and more — and flags them before they become expensive mistakes in development. When something is too unclear to proceed, the AI pauses and asks the user targeted clarifying questions, much like a senior business analyst would in a meeting.
+<!-- Beyond formatting, it also acts as a quality gate. It detects specific types of requirement problems — vague language, missing measurements, internal contradictions — and flags them before they become expensive mistakes in development. When something is too unclear to proceed, the AI pauses and asks the user targeted clarifying questions, much like a senior requirement engineer would in a meeting. -->
 
-The end product of one session is a set of clean, formal requirements that push directly into the team's existing tools — Jira stories or Trello cards — with a single click, removing the manual copy-paste step that wastes hours every sprint.
+The end product of one session is a set of clean, formal requirements that push directly into the team's existing tools — with a single click, removing the manual copy-paste step that wastes hours every sprint.
 
 ---
 
-## Slide 2 — What We've Built: The User Experience
+## Slide 4 — Multi-Agent Systems — Core Concepts
+
+> Sources: IBM (*What is a Multi-Agent System?*, *What is AI Agent Orchestration?*, *What is Multi-Agent Collaboration?*) and Google Cloud (*Guide to Multi-Agent Systems*)
+
+
+## 1. What is a Single Agent?
+
+A **single agent** is one autonomous AI that works entirely on its own. It perceives its environment, reasons, and acts independently to achieve a specific goal — with no interaction with other agents.
+
+> *"Single-agent systems feature a single, autonomous entity working independently within its environment to achieve specific goals, without direct interaction with other agents. Think of a chess-playing AI that operates in isolation, analyzing the board and making decisions based on predefined rules or learned strategies."*
+> — Google Cloud, Guide to Multi-Agent Systems
+
+### When single agents work best
+
+| Scenario | Why it fits |
+|---|---|
+| Well-defined problems | Clear rules, no collaboration needed |
+| Centralized control | Simpler to build, lower maintenance cost |
+| Predictable outcomes | Fraud detection, spam filtering, recommendations |
+
+**Examples:** Chess AI, spam filter, fraud detector, product recommendation engine
+
+---
+
+## 2. What is a Multi-Agent System?
+
+A **multi-agent system (MAS)** is when several autonomous AI agents — each with a specialized role — work together in a shared environment to solve problems too complex for any single agent.
+
+> *"A multi-agent system consists of multiple artificial intelligence agents working collectively to perform tasks on behalf of a user or another system. Each agent within a MAS has individual properties but all agents behave collaboratively to lead to desired global properties."*
+> — IBM, What is a Multi-Agent System?
+
+### 3 Core Components of a MAS
+
+| Component | Description |
+|---|---|
+| **Agents** | Active, decision-making entities — each has a role, tools, and a degree of autonomy |
+| **Environment** | The shared space (virtual or physical) where agents work and interact |
+| **Protocols** | The rules and languages agents use to communicate (e.g. JSON, FIPA ACL, KQML) |
+
+> *"The distributed workload and specialized roles allow MAS to handle complex, dynamic, or large-scale challenges that would overwhelm a single agent."*
+> — Google Cloud, Guide to Multi-Agent Systems
+
+**Examples:** Warehouse robot fleets, customer service pipelines, AI coding teams, supply chain management
+
+---
+
+## Slide 5 — Agent Orchestration
+
+## 3. What is Agent Orchestration?
+
+**Agent orchestration** is the coordination layer that manages which agent does what, when, and in what order — like a conductor directing an orchestra.
+
+> *"AI agent orchestration functions like a digital symphony. Each agent has a unique role and the system is guided by an orchestrator — either a central AI agent or framework — that manages and coordinates their interactions. The orchestrator helps synchronize these specialized agents, ensuring that the right agent is activated at the right time for each task."*
+> — IBM, What is AI Agent Orchestration?
+
+> *"Modern MAS operates on the principle of orchestration, where a complex task is broken down into a structured agentic workflow — like a project plan where different agents are assigned specific roles."*
+> — Google Cloud, Guide to Multi-Agent Systems
+
+### Types of Orchestration (IBM)
+
+| Type | How it works | Best for |
+|---|---|---|
+| **Centralized** | One orchestrator agent is the "brain" — assigns tasks, makes final decisions | Consistent, predictable workflows |
+| **Decentralized** | No single controller — agents communicate directly and reach consensus | Scalability and resilience |
+| **Hierarchical** | Agents arranged in layers, like a command structure — senior agents manage junior ones | Complex, tiered workflows |
+
+---
+
+## 4. Single Agent vs. Multi-Agent
+
+| Dimension | Single Agent | Multi-Agent System |
+|---|---|---|
+| **Structure** | One AI does everything | Multiple specialized AIs collaborate |
+| **Complexity** | Simple to build and maintain | Complex to design and coordinate |
+| **Cost** | Lower operational cost | Higher (especially with LLM API calls) |
+| **Task type** | Focused, well-defined tasks | Dynamic, large-scale, multi-step tasks |
+| **Communication** | No communication overhead | Agents pass messages and share results |
+| **Fault tolerance** | Fails completely if it fails | One agent failing doesn't stop the rest |
+| **Scalability** | Limited | Add more agents without breaking the system |
+
+> *"Multi-agent collaboration provides numerous architectural, computational and operational benefits in contrast with other agentic architecture types, specifically a single-agent system — especially in environments that are highly complex, distributed and have privacy constraints."*
+> — IBM, What is Multi-Agent Collaboration?
+
+---
+
+## Slide 6 — Multi-Agent Collaboration
+
+## 5. Centralized vs. Decentralized
+
+This refers to **how agents are controlled** and **how they share knowledge** within a MAS.
+
+> *"In centralized networks, a central unit contains the global knowledge base, connects the agents and oversees their information. Agents in decentralized networks share information with their neighboring agents instead of a global knowledge base — the failure of one agent does not cause the overall system to fail."*
+> — IBM, What is a Multi-Agent System?
+
+### Side-by-Side Comparison
+
+| Dimension | Centralized | Decentralized |
+|---|---|---|
+| **Control** | One central unit manages all agents | Agents self-organize and communicate peer-to-peer |
+| **Knowledge** | Global knowledge base shared by all | Each agent only knows what its neighbors share |
+| **Strength** | Easy communication, uniform knowledge | Robust, modular, fault tolerant |
+| **Weakness** | Single point of failure — if center fails, all fails | Can produce conflicting or unpredictable behavior |
+| **Scalability** | Harder to scale (bottleneck at center) | Easier to scale (no central dependency) |
+
+---
+
+## 6. How Do Multi-Agents Collaborate?
+
+Collaboration is the core mechanism that makes MAS powerful. Agents don't just work in parallel — they perceive, reason, act, and communicate in a coordinated loop.
+
+> *"Multi-agent orchestration allows agents, assistants and different data sources to collaborate — breaking down silos that separate teams and functions, enhancing knowledge sharing and speeding up decision-making."*
+> — IBM, Inside the World of Multi-Agent Orchestration
+
+### The Collaboration Loop
+
+| Step | What happens |
+|---|---|
+| **1. Perceive** | Agents observe their surroundings and collect data — directly or by noticing changes in the shared environment |
+| **2. Reason & decide** | An LLM acts as the agent's "brain," understanding intent and planning a course of action |
+| **3. Act** | Agents carry out their planned actions — searching, writing, coding, calling APIs, updating databases |
+| **4. Communicate** | Agents pass messages, share findings, or modify the shared environment for others to observe |
+| **5. Shared memory** | A common memory store holds intermediate outputs and decisions so agents stay aware of each other's progress |
+| **6. Iterate** | The flow orchestrator sequences tasks, handles errors, retries failed steps — agents can run simultaneously |
+
+### IBM's Components Enabling Collaboration
+
+- **Skill Registry** — lists each agent's capabilities and metadata so the system knows what each one can do
+- **Intent Parser** — uses NLP to read a user's request and match it to the right agent skills
+- **Flow Orchestrator** — handles task sequencing, branching, error handling, and retries
+- **Shared Context & Memory Store** — a common space for data, intermediate outputs, and decisions across all agents
+
+---
+
+## References
+
+1. IBM — *What is a Multi-Agent System?*
+   https://www.ibm.com/think/topics/multiagent-system
+
+2. IBM — *What is AI Agent Orchestration?*
+   https://www.ibm.com/think/topics/ai-agent-orchestration
+
+3. IBM — *What is Multi-Agent Collaboration?*
+   https://www.ibm.com/think/topics/multi-agent-collaboration
+
+4. IBM — *Inside the World of Multi-Agent Orchestration*
+   https://www.ibm.com/think/insights/boost-productivity-efficiency-multi-agent-orchestration
+
+5. Google Cloud — *Guide to Multi-Agent Systems (MAS)*
+   https://cloud.google.com/discover/what-is-a-multi-agent-system
+
+---
+
+
+
+
+<!-- ## Slide 2 — What We've Built: The User Experience
 
 **Headline:** From the moment you open the app, it just works — feed in whatever you have.
 
@@ -310,4 +486,4 @@ The request to the client is simple: come out of this meeting with answers to th
 
 *Document prepared by the Sentinel-RE development team. April 2026.*  
 *Total slides: 12 | Intended audience: Non-technical client stakeholders*  
-*Designer note: UI screenshots are available from the live application running at localhost:3000. The five-agent diagram on Slide 3 is a strong candidate for an icon-based visual. The performance table on Slide 8 can become an infographic with traffic-light status indicators.*
+*Designer note: UI screenshots are available from the live application running at localhost:3000. The five-agent diagram on Slide 3 is a strong candidate for an icon-based visual. The performance table on Slide 8 can become an infographic with traffic-light status indicators.* -->

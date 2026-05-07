@@ -1,6 +1,7 @@
 """
 Logging configuration for the RE Tool backend.
 """
+import io
 import logging
 import sys
 from pathlib import Path
@@ -21,13 +22,17 @@ def get_logger(name: str) -> logging.Logger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
+        # Console handler — force UTF-8 so LLM Unicode output doesn't crash on Windows cp1252
+        try:
+            console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        except AttributeError:
+            console_stream = sys.stdout
+        console_handler = logging.StreamHandler(console_stream)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(detailed_formatter)
-        
+
         # File handler
-        file_handler = logging.FileHandler(logs_dir / "re_tool.log")
+        file_handler = logging.FileHandler(logs_dir / "re_tool.log", encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(detailed_formatter)
         

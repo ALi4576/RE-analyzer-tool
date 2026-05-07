@@ -1,0 +1,56 @@
+# --- Dependencies & Environments ---
+node_modules/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Audio & Media (Massive Token Eaters) ---
+# These are binary files Claude cannot "read", but it will try to index them.
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+
+# --- Large Context & Data Files ---
+# PDF requirements are huge. Let your local RAG handle these, not Claude's prompt.
+*.pdf
+*.docx
+*.csv
+*.jsonl
+*.sqlite
+
+# --- LangGraph & Local AI Artifacts ---
+# Local model weights and logs
+.ollama/
+models/
+checkpoints/
+.langgraph_api/
+logs/
+*.log
+
+# --- Build & Output Artifacts ---
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Secrets & Private Config ---
+# Essential for security AND saving tokens
+.env
+.env.*
+secrets.json
+*.key
+*.pem
+
+# --- Large Documentation / Archives ---
+# Keep your active CLAUDE.md, but ignore old session archives
+.claude/sessions/archive/
+docs/old/
