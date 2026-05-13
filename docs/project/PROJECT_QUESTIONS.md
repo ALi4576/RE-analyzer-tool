@@ -1,7 +1,7 @@
 0. What is your designation in the organisation?
 Methodology expert, not manager or boss, expert. 
 1. What does the software intends to do? (Functional Requirements)
-To guide and support re in company in multiple things, asking right questions, write cosnt req and document them and saves time.
+To guide and support re in company in multiple things, asking right questions, write cosnt req and document them and saves time. Live feedback plus document or recording upload.
 
 2. Who are the major stakeholders?
 
@@ -28,20 +28,32 @@ there would be questions but not continuis interruptions, just write questions.
 12. Where should this software be delpoyed? Local or Cloud and if cloud what are acceptable cloud providers?
 12. Who will be the data owner of the requirements?
 13. Any sort of analytics or judgement for the software later on? Example how good AI is performing?
-no
+no, but review would be taken from the persons using it
 14. Does the software have capabilities of self learning and correction?
+upto us
 
 15. What are the existing data sources or in techincal terms knowlege base for the AI to follow your
 organisation rules and guide lines?
-baclog, sharepoint and models, sharepoint site
+backlog, sharepoint and models, sharepoint site
 
 16. Will all users be in the same physical location, or distributed across offices and time zones?
+All the time and everywhere
 17. Who on your side will be conducting the acceptance testing, and what sign-off process do you follow?
-18. What would be the output of the system? Document summary of discussion that can be sent to person in the interviews and team. ISO compliant format, user stories, usecase, UML, flow charts, state diagram.
+18. What would be the output of the system? Asks also about what type of artifacts needed to be generated. Document summary of discussion that can be sent to person in the interviews and team. ISO compliant format, user stories, usecase, UML, flow charts, state diagram.
 19. Does the system only automates the process or it should check for quality of requirements against some criteria?
 20. Does every session be saved or after generating requirements it would auto delete?
-BAcklog, sharepoint and other artifacts would be used in follow up meetings.
+Backlog, sharepoint and other artifacts would be used in follow up meetings. Ask user for how much time interview is saved like 2 days etc
 
 Actively listening to tools like MS teams
 
 Nothing automatically change in backlog always there would be a person to approve
+
+
+for questions from AI there would always be context of the question from the meeting etc
+
+unanswered questions should be flagged
+
+Questions should be prioritized like critcal, optional etc
+
+tool should also suggest multiple possible conflict answers
+
