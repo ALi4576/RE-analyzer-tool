@@ -20,7 +20,7 @@ no
 8. What would be the response time and number of concurrent users?
 max 5 people but can go to more 100 to 190
 
-9. What are the other external systems this software is going to communicate with? Like Jira, Trello, MS office suite, share point
+9. What are the other external systems this software is going to communicate with? Like Jira, Trello, MS office suite, share point, azure devops
 10. Wouldnt it be better for software to ask questions at the end of meeting because continuos interruption may cost more interms of tokens
 there would be questions but not continuis interruptions, just write questions.
 
