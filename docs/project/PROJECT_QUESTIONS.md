@@ -37,7 +37,7 @@ baclog, sharepoint and models, sharepoint site
 
 16. Will all users be in the same physical location, or distributed across offices and time zones?
 17. Who on your side will be conducting the acceptance testing, and what sign-off process do you follow?
-18. What would be the output of the system? ISO compliant format, user stories, usecase, UML, flow charts, state diagram.
+18. What would be the output of the system? Document summary of discussion that can be sent to person in the interviews and team. ISO compliant format, user stories, usecase, UML, flow charts, state diagram.
 19. Does the system only automates the process or it should check for quality of requirements against some criteria?
 20. Does every session be saved or after generating requirements it would auto delete?
 BAcklog, sharepoint and other artifacts would be used in follow up meetings.
